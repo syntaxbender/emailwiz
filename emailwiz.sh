@@ -202,7 +202,7 @@ submission inet n       -       y       -       -       smtpd
   -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject_unauth_destination
 smtps     inet  n       -       y       -       -       smtpd
   -o syslog_name=postfix/smtps
-  -o smtpd_tls_wrappermode=yes
+  -o smtpd_tls_wrappermode=no
   -o smtpd_sasl_auth_enable=yes
 spamassassin unix -     n       n       -       -       pipe
   user=debian-spamd argv=/usr/bin/spamc -f -e /usr/sbin/sendmail -oi -f \${sender} \${recipient}" >> /etc/postfix/master.cf
