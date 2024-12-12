@@ -159,7 +159,7 @@ postconf -e 'smtpd_sasl_type = dovecot'
 postconf -e 'smtpd_sasl_path = private/auth'
 
 # helo, sender, relay and recipient restrictions
-#postconf -e "smtpd_sender_login_maps = pcre:/etc/postfix/login_maps.pcre"
+postconf -e "smtpd_sender_login_maps = pcre:/etc/postfix/login_maps.pcre"
 postconf -e 'smtpd_sender_restrictions = permit_sasl_authenticated, permit_mynetworks, reject_sender_login_mismatch, reject_unknown_reverse_client_hostname, reject_unknown_sender_domain'
 postconf -e 'smtpd_recipient_restrictions = permit_sasl_authenticated, permit_mynetworks, reject_unauth_destination, reject_unknown_recipient_domain'
 postconf -e 'smtpd_relay_restrictions = permit_sasl_authenticated, reject_unauth_destination'
@@ -195,15 +195,24 @@ submission inet n       -       y       -       -       smtpd
   -o syslog_name=postfix/submission
   -o smtpd_tls_security_level=encrypt
   -o smtpd_tls_auth_only=yes
+  -o smtpd_tls_wrappermode=no
   -o smtpd_enforce_tls=yes
   -o smtpd_client_restrictions=permit_sasl_authenticated,reject
   -o smtpd_sender_restrictions=reject_sender_login_mismatch
-  -o smtpd_sender_login_maps=pcre:/etc/postfix/login_maps.pcre
+#  -o smtpd_sender_login_maps=pcre:/etc/postfix/login_maps.pcre
+  -o smtpd_sasl_auth_enable=yes
+  -o smtpd_sasl_type=dovecot
+  -o smtpd_sasl_path=private/auth
+  -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
   -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject_unauth_destination
 smtps     inet  n       -       y       -       -       smtpd
   -o syslog_name=postfix/smtps
-  -o smtpd_tls_wrappermode=no
+  -o smtpd_tls_wrappermode=yes
   -o smtpd_sasl_auth_enable=yes
+  -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
+  -o smtpd_recipient_restrictions=permit_mynetworks,permit_sasl_authenticated,reject
+  -o smtpd_sasl_type=dovecot
+  -o smtpd_sasl_path=private/auth
 spamassassin unix -     n       n       -       -       pipe
   user=debian-spamd argv=/usr/bin/spamc -f -e /usr/sbin/sendmail -oi -f \${sender} \${recipient}" >> /etc/postfix/master.cf
 
