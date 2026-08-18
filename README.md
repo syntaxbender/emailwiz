@@ -13,8 +13,8 @@ and SQLite stores virtual domains and mailbox identities.
 | SQLite | Virtual domain, mailbox, password-hash and home-path database |
 | OpenDKIM | A separate DKIM key and signing rule for every hosted domain |
 | Certbot | A separate certificate for every `mail.<domain>` hostname |
-| SpamAssassin | Spam classification used by the default Sieve rule |
-| Pigeonhole Sieve | Moves messages marked as spam into `Junk` |
+| SpamAssassin (optional) | Inbound spam classification when explicitly enabled during installation |
+| Pigeonhole Sieve | User filtering; moves SpamAssassin-marked messages into `Junk` when that option is enabled |
 | Fail2ban | Postfix and Dovecot login protection |
 
 Postfix is not replaced by SQLite. SQLite replaces the old PAM/Unix-account
@@ -93,6 +93,17 @@ git clone https://github.com/syntaxbender/emailwiz.git
 cd emailwiz
 sudo sh emailwiz.sh
 ```
+
+SpamAssassin is disabled by default. Enable it explicitly if this server should
+classify inbound port 25 mail locally:
+
+```sh
+sudo sh emailwiz.sh --with-spamassassin
+```
+
+Without that flag, the SpamAssassin packages, Postfix content filter and global
+`X-Spam-Flag` to `Junk` Sieve rule are omitted. `--without-spamassassin` is also
+accepted when automation should state the default choice explicitly.
 
 Before installation:
 

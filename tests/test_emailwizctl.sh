@@ -142,6 +142,26 @@ assert_sql() {
 }
 
 MOCK_DOVECOT_VERSION=2.3.16 "$ctl" system init
+assert_sql no "SELECT value FROM metadata WHERE key = 'spamassassin_enabled';"
+assert_contains 'keep;' "$EMAILWIZ_SIEVE_DIR/default.sieve"
+if grep -F 'X-Spam-Flag' "$EMAILWIZ_SIEVE_DIR/default.sieve" >/dev/null; then
+	printf 'Disabled SpamAssassin unexpectedly installed the global spam Sieve rule.\n' >&2
+	exit 1
+fi
+MOCK_DOVECOT_VERSION=2.3.16 "$ctl" system init --spamassassin yes
+assert_sql yes "SELECT value FROM metadata WHERE key = 'spamassassin_enabled';"
+assert_contains 'X-Spam-Flag' "$EMAILWIZ_SIEVE_DIR/default.sieve"
+# Omitting the option on a later init preserves the selected mode.
+MOCK_DOVECOT_VERSION=2.3.16 "$ctl" system init
+assert_sql yes "SELECT value FROM metadata WHERE key = 'spamassassin_enabled';"
+if MOCK_DOVECOT_VERSION=2.3.16 "$ctl" system init --spamassassin invalid >/dev/null 2>&1; then
+	printf 'An invalid SpamAssassin mode was unexpectedly accepted.\n' >&2
+	exit 1
+fi
+sh "$repo_dir/emailwiz.sh" --help | grep -F -- '--with-spamassassin' >/dev/null || {
+	printf 'Installer help does not document the SpamAssassin option.\n' >&2
+	exit 1
+}
 MOCK_DOVECOT_VERSION=2.3.16 "$ctl" domain add example.com \
 	--cert-dir "$test_root/certs/mail.example.com" --no-reload
 MOCK_DOVECOT_VERSION=2.3.16 "$ctl" domain add example.net \

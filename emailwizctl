@@ -38,7 +38,7 @@ die() {
 usage() {
 	cat <<'EOF'
 Usage:
-  emailwizctl system init [--certificate-mode letsencrypt|selfsigned]
+  emailwizctl system init [--certificate-mode letsencrypt|selfsigned] [--spamassassin yes|no]
   emailwizctl system render [--no-reload]
   emailwizctl system version
 
@@ -256,13 +256,21 @@ EOF
 
 write_sieve_default() {
 	mkdir -p "$SIEVE_DIR"
-	cat > "$SIEVE_DIR/default.sieve" <<'EOF'
+	spamassassin_enabled=$(metadata_get spamassassin_enabled || true)
+	if [ "$spamassassin_enabled" = yes ]; then
+		cat > "$SIEVE_DIR/default.sieve" <<'EOF'
 require ["fileinto", "mailbox"];
 if header :contains "X-Spam-Flag" "YES"
 {
     fileinto :create "Junk";
 }
 EOF
+	else
+		cat > "$SIEVE_DIR/default.sieve" <<'EOF'
+# SpamAssassin is disabled; retain normal Sieve delivery without a global rule.
+keep;
+EOF
+	fi
 	chmod 0644 "$SIEVE_DIR/default.sieve"
 	if command -v sievec >/dev/null 2>&1; then
 		sievec "$SIEVE_DIR/default.sieve"
@@ -292,11 +300,17 @@ warn_legacy_mailboxes() {
 system_init() {
 	require_root
 	mode=''
+	spamassassin=''
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
 			--certificate-mode)
 				[ "$#" -ge 2 ] || die "--certificate-mode requires a value."
 				mode=$2
+				shift 2
+				;;
+			--spamassassin)
+				[ "$#" -ge 2 ] || die "--spamassassin requires a value."
+				spamassassin=$2
 				shift 2
 				;;
 			*) die "Unknown system init option: $1" ;;
@@ -310,8 +324,14 @@ system_init() {
 		mode=${mode:-letsencrypt}
 	fi
 	case "$mode" in letsencrypt|selfsigned) ;; *) die "Certificate mode must be letsencrypt or selfsigned." ;; esac
+	if [ -z "$spamassassin" ]; then
+		spamassassin=$(metadata_get spamassassin_enabled || true)
+		spamassassin=${spamassassin:-no}
+	fi
+	case "$spamassassin" in yes|no) ;; *) die "SpamAssassin mode must be yes or no." ;; esac
 	metadata_set schema_version 1
 	metadata_set certificate_mode "$mode"
+	metadata_set spamassassin_enabled "$spamassassin"
 	metadata_set dovecot_version "$DOVECOT_VERSION"
 	metadata_set dovecot_family "$DOVECOT_FAMILY"
 	metadata_set mailbox_format maildir
@@ -671,7 +691,9 @@ system_version() {
 	require_database
 	detect_dovecot
 	configured=$(metadata_get dovecot_family || true)
-	printf 'installed=%s\ndetected_family=%s\nconfigured_family=%s\n' "$DOVECOT_VERSION" "$DOVECOT_FAMILY" "${configured:-not-rendered}"
+	spamassassin=$(metadata_get spamassassin_enabled || true)
+	printf 'installed=%s\ndetected_family=%s\nconfigured_family=%s\nspamassassin=%s\n' \
+		"$DOVECOT_VERSION" "$DOVECOT_FAMILY" "${configured:-not-rendered}" "${spamassassin:-no}"
 }
 
 obtain_letsencrypt_certificate() {
