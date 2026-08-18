@@ -3,10 +3,12 @@
 domain="$1"
 
 # Input validation to allow only valid domain characters
-if ! [[ "$domain" =~ ^[a-zA-Z0-9.-]+$ ]]; then
-    echo "Give a valid domain as an argument to add mail server for it. Only alphanumeric characters, dashes, and dots are allowed."
-    exit 1
-fi
+case "$domain" in
+    ''|*[!a-zA-Z0-9.-]*)
+        echo "Give a valid domain as an argument to add mail server for it. Only alphanumeric characters, dashes, and dots are allowed."
+        exit 1
+        ;;
+esac
 
 subdom="mail"
 maildomain="mail.$(cat /etc/mailname)"
