@@ -1,167 +1,216 @@
-# Email server setup script
+# Emailwiz
 
-This script installs an email server with all the features required in the
-modern web.
+Emailwiz installs a small multi-domain mail server on Ubuntu. Postfix remains
+the SMTP server, Dovecot provides IMAP/POP3, authentication and LMTP delivery,
+and SQLite stores virtual domains and mailbox identities.
 
-I've linked this file on Github to a shorter, more memorable address on my
-website so you can get it on your machine with this short command:
+## Installed inventory
+
+| Component | Purpose |
+| --- | --- |
+| Postfix + `postfix-sqlite` | SMTP, recipient checks, authenticated submission and SQLite lookup maps |
+| Dovecot IMAP/POP3/LMTP + `dovecot-sqlite` | Client access, SQLite password authentication and delivery as the mapped Unix UID/GID |
+| SQLite | Virtual domain, mailbox, password-hash and home-path database |
+| OpenDKIM | A separate DKIM key and signing rule for every hosted domain |
+| Certbot | A separate certificate for every `mail.<domain>` hostname |
+| SpamAssassin | Spam classification used by the default Sieve rule |
+| Pigeonhole Sieve | Moves messages marked as spam into `Junk` |
+| Fail2ban | Postfix and Dovecot login protection |
+
+Postfix is not replaced by SQLite. SQLite replaces the old PAM/Unix-account
+mailbox database and supplies Postfix's virtual lookup tables.
+
+## Supported Ubuntu and Dovecot versions
+
+The installer requires Ubuntu 22.04 or newer and detects the installed version
+with `dovecot --version`. It generates independent configurations for the 2.3
+and 2.4 syntax families.
+
+| Ubuntu release | Ubuntu package family | Generated configuration |
+| --- | --- | --- |
+| 22.04 LTS | Dovecot 2.3.16 | Dovecot 2.3 syntax and external SQLite config |
+| 24.04 LTS | Dovecot 2.3.21 | Dovecot 2.3 syntax and external SQLite config |
+| 25.10 | Dovecot 2.4.1 | Dovecot 2.4 syntax with version headers and inline SQLite settings |
+| 26.04 LTS | Dovecot 2.4.2 | Dovecot 2.4 syntax with version headers and inline SQLite settings |
+
+The package versions above follow the current [Ubuntu package
+index](https://packages.ubuntu.com/en/dovecot-core). A PPA or backport is also
+handled correctly because selection uses the Dovecot version, not the Ubuntu
+codename. Versions outside the 2.3/2.4 families are rejected until a matching
+configuration generator exists. Dovecot documents the incompatible 2.4 syntax
+changes in its [2.3 to 2.4 upgrade
+guide](https://doc.dovecot.org/2.4.2/installation/upgrade/2.3-to-2.4.html).
+
+Run this after an operating-system upgrade to regenerate and validate the
+configuration for the newly installed Dovecot version:
 
 ```sh
-curl -LO lukesmith.xyz/emailwiz.sh
+sudo emailwizctl system render
+sudo emailwizctl system version
 ```
 
-When prompted by a dialog menu at the beginning, select "Internet Site", then
-give your full domain without any subdomain, e.g. `lukesmith.xyz`.
+## Storage and identity model
 
-I'm glad to say that dozens, hundreds of people have now used it and there is a
-sizeable network of people with email servers thanks to this script.
+A mailbox is a virtual email identity mapped to the home directory of one
+existing Unix user:
 
-## This script installs
-
-- **Postfix** to send and receive mail.
-- **Dovecot** to get mail to your email client (mutt, Thunderbird, etc.).
-- Config files that link the two above securely with native PAM log-ins.
-- **Spamassassin** to prevent spam and allow you to make custom filters.
-- **OpenDKIM** to validate you so you can send to Gmail and other big sites.
-- **Certbot** SSL certificates, if not already present.
-- **fail2ban** to increase server security, with enabled modules for the above
-  programs.
-- (optionally) **a self-signed certificate** instead of OpenDKIM and Certbot. This allows to quickly set up an isolated mail server that collects email notifications from devices in the same local network(s) or serves as secure/private messaging system over VPN.
-
-## This script does _not_...
-
-- use a SQL database or anything like that. We keep it simple and use normal
-  Unix system users for accounts and passwords.
-- set up a graphical web interface for mail like Roundcube or Squirrel Mail.
-  You are expected to use a normal mail client like Thunderbird or K-9 for
-  Android or good old mutt with
-  [mutt-wizard](https://github.com/lukesmithxyz/mutt-wizard). Note that there
-  is a guide for [Rainloop](https://landchad.net/rainloop/) on
-  [LandChad.net](https://landchad.net) for those that want such a web
-  interface.
-
-## Prerequisites for Installation
-
-1. Debian or Ubuntu server.
-2. DNS records that point at least your domain's `mail.` subdomain to your
-   server's IP (IPv4 and IPv6). This is required on initial run for certbot to
-   get an SSL certificate for your `mail.` subdomain.
-
-## Mandatory Finishing Touches
-
-### Unblock your ports
-
-While the script enables your mail ports on your server, it is common practice
-for all VPS providers to block mail ports on their end by default. Open a help
-ticket with your VPS provider asking them to open your mail ports and they will
-do it in short order.
-
-### DNS records
-
-At the end of the script, you will be given some DNS records to add to your DNS
-server/registrar's website. These are mostly for authenticating your emails as
-non-spam. The 4 records are:
-
-1. An MX record directing to `mail.yourdomain.tld`.
-2. A TXT record for SPF (to reduce mail spoofing).
-3. A TXT record for DMARC policies.
-4. A TXT record with your public DKIM key. This record is long and **uniquely
-   generated** while running `emailwiz.sh` and thus must be added after
-   installation.
-
-They will look something like this:
-
-```
-@	MX	10	mail.example.org
-mail._domainkey.example.org    TXT     v=DKIM1; k=rsa; p=anextremelylongsequenceoflettersandnumbersgeneratedbyopendkim
-_dmarc.example.org     TXT     v=DMARC1; p=reject; rua=mailto:dmarc@example.org; fo=1
-example.org    TXT     v=spf1 mx a: -all
+```text
+alice@example.com -> /home/mehmet -> UID/GID from /etc/passwd
 ```
 
-The script will create a file, `~/dns_emailwiz` that will list our the records
-for your convenience, and also prints them at the end of the script.
+Mail stays in the original Emailwiz layout:
 
-### Add a rDNS/PTR record as well!
-
-Set a reverse DNS or PTR record to avoid getting spammed. You can do this at
-your VPS provider, and should set it to `mail.yourdomain.tld`. Note that you
-should set this for both IPv4 and IPv6.
-
-## Making new users/mail accounts
-
-Let's say we want to add a user Billy and let him receive mail, run this:
-
-```
-useradd -m -G mail billy
-passwd billy
+```text
+/home/mehmet/Mail
+/home/mehmet/Mail/Inbox
 ```
 
-Any user added to the `mail` group will be able to receive mail. Suppose a user
-Cassie already exists and we want to let her receive mail too. Just run:
+The Unix account must already exist. Emailwiz never creates it and never reads
+or copies its `/etc/shadow` password. Dovecot authenticates the full email
+address against a hash in `/var/lib/emailwiz/emailwiz.sqlite3`, then uses the
+stored UID/GID to access that user's mail files.
 
-```
-usermod -a -G mail cassie
-```
+When a mailbox is created:
 
-A user's mail will appear in `~/Mail/`. If you want to see your mail while ssh'd
-in the server, you could just install mutt, add `set spoolfile="+Inbox"` to
-your `~/.muttrc` and use mutt to view and reply to mail. You'll probably want
-to log in remotely though:
+- `home_path` must exactly match one `/etc/passwd` home directory below `/home`.
+- A missing `Mail` directory is created and assigned to that Unix UID/GID.
+- An existing empty `Mail` directory is reused with a warning.
+- An existing non-empty `Mail` directory causes an error and is never changed.
+- Existing mail is not migrated automatically.
 
-## Installing with self-signed certificate, in "isolated" mode
+More than one virtual identity may point at the same home while its `Mail`
+directory is empty. Those identities share the same physical mailbox. Purging
+one shared identity removes only its database row; physical mail is retained
+until the final identity using that home is purged.
 
-This mode skips the setup of OpenDKIM and Certbot, and will instead create a self-signed cert that lasts 100 years. It also allows to customize the logic country name, state/province name and organization name to generate the certificate automatically. An example usecase is for an isolated server that collects notifications from devices in the same local network(s) or serves as secure/private messaging system over VPN (wireguard or whatever).
-This server with self-signed certificate as configured will NOT be able to send anything to public mail servers (Gmail, Outlook and so on), at least not directly.
+## Installation
 
-open the script and change the following line 
-```
-selfsigned="no" # yes no
-```
-to become 
-```
-selfsigned="yes" # yes no
-```
-it's also possible to customize and automate the self-signed certificate creation
-by changing the following lines in the script 
-```
-use_cert_config="no"
-```
-to
-```
-use_cert_config="yes"
+The installer now needs `emailwizctl`, so clone the repository instead of
+downloading only `emailwiz.sh`:
+
+```sh
+git clone https://github.com/syntaxbender/emailwiz.git
+cd emailwiz
+sudo sh emailwiz.sh
 ```
 
-and then write country name, state/province name and organization name in the following lines
+Before installation:
+
+1. Set `/etc/mailname` to the initial bare domain, such as `example.com`.
+2. Point `mail.example.com` to the server with an A and/or AAAA record.
+3. Ensure ports 25, 80, 110, 465, 587, 993 and 995 are allowed by the hosting provider.
+4. Configure PTR/rDNS for the server's primary mail hostname.
+
+The installer initializes SQLite, adds the initial domain, generates its DKIM
+key, obtains its TLS certificate and prints the required MX/SPF/DKIM/DMARC
+records. DNS output is retained under `/var/lib/emailwiz/dns/`.
+
+For an isolated installation, set `selfsigned="yes"` near the top of
+`emailwiz.sh` before running it. Initial and later domain certificates will then
+be generated under `/etc/emailwiz/certs/`; public clients will not trust them
+unless their CA/trust configuration is managed separately.
+
+The old standalone `adddomain.sh` command remains as a compatibility wrapper
+for `emailwizctl domain add`.
+
+## Domain management
+
+Each domain uses `mail.<domain>` as its MX/client hostname. Postfix and Dovecot
+select that domain's certificate with TLS SNI. The hostname needs an A or AAAA
+record before Certbot can issue the certificate.
+
+```sh
+sudo emailwizctl domain add example.net
+sudo emailwizctl domain list
+sudo emailwizctl domain list --all
 ```
-country_name="" # IT US UK IN etc etc
-state_or_province_name=""
-organization_name=""
+
+If a certificate is managed externally, provide its directory. It must contain
+`fullchain.pem` and `privkey.pem`:
+
+```sh
+sudo emailwizctl domain add example.net --cert-dir /etc/custom-certs/mail.example.net
 ```
 
-## Logging in from email clients (Thunderbird/mutt/etc)
+Domain deletion is soft by default. It disables reception/login while keeping
+the certificate, DKIM key and every mailbox record:
 
-Let's say you want to access your mail with Thunderbird or mutt or another
-email program. For my domain, the server information will be as follows:
+```sh
+sudo emailwizctl domain delete example.net
+sudo emailwizctl domain enable example.net
+```
 
-- SMTP server: `mail.lukesmith.xyz`
-- SMTP port: 465
-- IMAP server: `mail.lukesmith.xyz`
-- IMAP port: 993
+Permanent deletion requires all users under the domain to be purged first:
 
-## Benefited from this?
+```sh
+sudo emailwizctl domain delete example.net --purge
+```
 
-I am always glad to hear this script is still making life easy for people. If
-this script or documentation has saved you some frustration, donate here:
+`--purge` removes the database domain and its DKIM material. It removes a
+certificate only when it is inside an Emailwiz-managed Certbot or self-signed
+location; external certificate directories are retained.
 
-- btc: `bc1qzw6mk80t3vrp2cugmgfjqgtgzhldrqac5axfh4`
-- xmr: `8A5v4Ci11Lz7BDoE2z2oPqMoNHzr5Zj8B3Q2N2qzqrUKhAKgNQYGSSaZDnBUWg6iXCiZyvC9mVCyGj5kGMJTi1zGKGM4Trm`
+## Mailbox management
 
-## Sites for Troubleshooting
+Create the Unix account yourself, then map the virtual mailbox to its home:
 
-Can't send or receive mail? Getting marked as spam? There are tools to double-check your DNS records and more:
+```sh
+sudo useradd -m mehmet
+sudo emailwizctl user add alice@example.com --home /home/mehmet
+```
 
-- Always check `journalctl -xe` first for specific errors.
-- [Check your DNS](https://intodns.com/)
-- [Test your TXT records via mail](https://appmaildev.com/en/dkim)
-- [Is your IP blacklisted?](https://mxtoolbox.com/blacklists.aspx)
-- [mxtoolbox](https://mxtoolbox.com/SuperTool.aspx)
+The password is prompted for without echoing. Automation can supply exactly
+one line on standard input:
+
+```sh
+printf '%s\n' "$MAIL_PASSWORD" |
+  sudo emailwizctl user add alice@example.com --home /home/mehmet --password-stdin
+```
+
+Other management commands:
+
+```sh
+sudo emailwizctl user list
+sudo emailwizctl user list --domain example.com --all
+sudo emailwizctl user passwd alice@example.com
+sudo emailwizctl user delete alice@example.com
+sudo emailwizctl user enable alice@example.com
+sudo emailwizctl user delete alice@example.com --purge
+```
+
+Soft deletion only disables authentication and delivery. User purge deletes
+the database identity and, for the final identity mapped to that home, exactly
+`<home_path>/Mail`; it retains the Unix account and every other file in the
+home directory. Symlinked or unexpected paths are rejected.
+
+## Client settings
+
+For `alice@example.com` use the full email address as the username:
+
+| Setting | Value |
+| --- | --- |
+| Username | `alice@example.com` |
+| SMTP server | `mail.example.com` |
+| SMTP port | 465 (implicit TLS) or 587 (STARTTLS) |
+| IMAP server | `mail.example.com` |
+| IMAP port | 993 |
+
+Per-domain certificates rely on client TLS SNI support. Current Thunderbird,
+K-9, Apple Mail, Mutt and NeoMutt support it; very old clients such as Outlook
+2013 do not. Dovecot lists the known compatibility caveats in its [SNI
+documentation](https://doc.dovecot.org/2.4.3/core/config/ssl.html#with-client-tls-sni-server-name-indication-support).
+
+## Tests
+
+The integration suite uses temporary paths and does not modify system mail
+configuration:
+
+```sh
+tests/test_emailwizctl.sh
+
+# Optional: also parse both configs with the official Dovecot Docker images.
+EMAILWIZ_DOCKER_TEST=1 tests/test_emailwizctl.sh
+```
+
+It covers both generated Dovecot syntax families, SQLite mappings, multi-domain
+TLS maps, UID/GID home mapping, soft deletion and guarded purge behavior.
