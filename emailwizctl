@@ -10,12 +10,10 @@ DNS_DIR=${EMAILWIZ_DNS_DIR:-$STATE_DIR/dns}
 DOVECOT_CONF=${EMAILWIZ_DOVECOT_CONF:-/etc/dovecot/dovecot.conf}
 DOVECOT_SQL_CONF=${EMAILWIZ_DOVECOT_SQL_CONF:-/etc/dovecot/emailwiz-sql.conf.ext}
 POSTFIX_DIR=${EMAILWIZ_POSTFIX_DIR:-/etc/postfix}
-POSTFIX_SNI_MAP=${EMAILWIZ_POSTFIX_SNI_MAP:-$POSTFIX_DIR/emailwiz-sni}
 OPENDKIM_KEYTABLE=${EMAILWIZ_OPENDKIM_KEYTABLE:-$POSTFIX_DIR/dkim/keytable}
 OPENDKIM_SIGNINGTABLE=${EMAILWIZ_OPENDKIM_SIGNINGTABLE:-$POSTFIX_DIR/dkim/signingtable}
 DKIM_ROOT=${EMAILWIZ_DKIM_ROOT:-$POSTFIX_DIR/dkim}
 SIEVE_DIR=${EMAILWIZ_SIEVE_DIR:-/var/lib/dovecot/sieve}
-CERT_ROOT=${EMAILWIZ_CERT_ROOT:-/etc/emailwiz/certs}
 HOME_ROOT=${EMAILWIZ_HOME_ROOT:-/home}
 RENEW_HOOK=${EMAILWIZ_RENEW_HOOK:-/etc/letsencrypt/renewal-hooks/deploy/emailwiz}
 OS_RELEASE_FILE=${EMAILWIZ_OS_RELEASE_FILE:-/etc/os-release}
@@ -39,10 +37,11 @@ usage() {
 	cat <<'EOF'
 Usage:
   emailwizctl system init [--certificate-mode letsencrypt|selfsigned] [--spamassassin yes|no]
+  emailwizctl system tls HOSTNAME --cert-dir DIR [--no-reload]
   emailwizctl system render [--no-reload]
   emailwizctl system version
 
-  emailwizctl domain add DOMAIN [--cert-dir DIR] [--no-reload]
+  emailwizctl domain add DOMAIN [--no-reload]
   emailwizctl domain list [--all]
   emailwizctl domain delete DOMAIN [--purge] [--no-reload]
   emailwizctl domain enable DOMAIN [--no-reload]
@@ -54,7 +53,8 @@ Usage:
   emailwizctl user enable ADDRESS
 
 Passwords are prompted for by default. Use --password-stdin for automation.
-DOMAIN is hosted as mail.DOMAIN and receives its own TLS certificate and DKIM key.
+All domains use the system's canonical mail hostname and TLS certificate.
+Each domain receives its own DKIM key.
 EOF
 }
 
@@ -93,6 +93,11 @@ metadata_set() {
 	key=$(sql_escape "$1")
 	value=$(sql_escape "$2")
 	sql "INSERT INTO metadata(key, value) VALUES('$key', '$value') ON CONFLICT(key) DO UPDATE SET value = excluded.value;"
+}
+
+metadata_delete() {
+	key=$(sql_escape "$1")
+	sql "DELETE FROM metadata WHERE key = '$key';"
 }
 
 normalize_domain() {
@@ -160,6 +165,14 @@ active_domain_count() {
 	sql 'SELECT COUNT(*) FROM domains WHERE enabled = 1;'
 }
 
+load_canonical_tls() {
+	CANONICAL_MAIL_HOSTNAME=$(metadata_get canonical_mail_hostname || true)
+	CANONICAL_CERT_DIR=$(metadata_get canonical_cert_dir || true)
+	[ -n "$CANONICAL_MAIL_HOSTNAME" ] && [ -n "$CANONICAL_CERT_DIR" ] ||
+		die "Canonical TLS is not configured. Run '$PROGRAM system tls HOSTNAME --cert-dir DIR'."
+	validate_certificate_hostname "$CANONICAL_CERT_DIR" "$CANONICAL_MAIL_HOSTNAME"
+}
+
 detect_dovecot() {
 	require_command dovecot
 	DOVECOT_VERSION=$(dovecot --version 2>/dev/null | awk 'NR == 1 { print $1 }')
@@ -195,8 +208,6 @@ CREATE TABLE IF NOT EXISTS metadata (
 CREATE TABLE IF NOT EXISTS domains (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL COLLATE NOCASE UNIQUE,
-    mail_hostname TEXT NOT NULL COLLATE NOCASE UNIQUE,
-    cert_dir TEXT NOT NULL,
     dkim_selector TEXT NOT NULL DEFAULT 'mail',
     enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -221,6 +232,38 @@ CREATE INDEX IF NOT EXISTS mail_users_domain_enabled_idx
 CREATE INDEX IF NOT EXISTS mail_users_home_path_idx
     ON mail_users(home_path);
 EOF
+
+	# Schema version 1 stored a separate hostname and certificate on every
+	# domain. Preserve the first (original/primary) domain as the canonical
+	# system TLS identity, then remove the per-domain columns.
+	if [ "$(sql "SELECT COUNT(*) FROM pragma_table_info('domains') WHERE name = 'mail_hostname';")" -gt 0 ]; then
+		legacy_hostname=$(sql 'SELECT mail_hostname FROM domains ORDER BY id LIMIT 1;')
+		legacy_cert_dir=$(sql 'SELECT cert_dir FROM domains ORDER BY id LIMIT 1;')
+		if [ -n "$legacy_hostname" ] && [ -n "$legacy_cert_dir" ]; then
+			[ -n "$(metadata_get canonical_mail_hostname || true)" ] || metadata_set canonical_mail_hostname "$legacy_hostname"
+			[ -n "$(metadata_get canonical_cert_dir || true)" ] || metadata_set canonical_cert_dir "$legacy_cert_dir"
+		fi
+		"$SQLITE3" "$DB_PATH" <<'EOF'
+PRAGMA foreign_keys = OFF;
+BEGIN IMMEDIATE;
+CREATE TABLE domains_emailwiz_v2 (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    dkim_selector TEXT NOT NULL DEFAULT 'mail',
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TEXT
+);
+INSERT INTO domains_emailwiz_v2(id, name, dkim_selector, enabled, created_at, deleted_at)
+    SELECT id, name, dkim_selector, enabled, created_at, deleted_at FROM domains;
+DROP TABLE domains;
+ALTER TABLE domains_emailwiz_v2 RENAME TO domains;
+COMMIT;
+PRAGMA foreign_keys = ON;
+EOF
+		foreign_key_errors=$(sql 'PRAGMA foreign_key_check;')
+		[ -z "$foreign_key_errors" ] || die "Database migration produced foreign-key errors: $foreign_key_errors"
+	fi
 
 	if [ "${EMAILWIZ_TEST_MODE:-0}" != 1 ]; then
 		getent group emailwiz >/dev/null 2>&1 || groupadd --system emailwiz
@@ -282,7 +325,6 @@ write_renew_hook() {
 	cat > "$RENEW_HOOK" <<EOF
 #!/bin/sh
 set -eu
-postmap -F hash:$POSTFIX_SNI_MAP
 systemctl reload postfix
 systemctl reload dovecot
 EOF
@@ -329,7 +371,7 @@ system_init() {
 		spamassassin=${spamassassin:-no}
 	fi
 	case "$spamassassin" in yes|no) ;; *) die "SpamAssassin mode must be yes or no." ;; esac
-	metadata_set schema_version 1
+	metadata_set schema_version 2
 	metadata_set certificate_mode "$mode"
 	metadata_set spamassassin_enabled "$spamassassin"
 	metadata_set dovecot_version "$DOVECOT_VERSION"
@@ -343,6 +385,51 @@ system_init() {
 	fi
 	warn_legacy_mailboxes
 	say "Initialized Emailwiz database at $DB_PATH (Dovecot $DOVECOT_VERSION, config family $DOVECOT_FAMILY)."
+}
+
+system_tls() {
+	require_root
+	require_database
+	[ "$#" -ge 1 ] || die "system tls requires HOSTNAME."
+	hostname=$(normalize_domain "$1")
+	shift
+	validate_domain "$hostname"
+	cert_dir=''
+	no_reload=0
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--cert-dir)
+				[ "$#" -ge 2 ] || die "--cert-dir requires a value."
+				cert_dir=$2
+				shift 2
+				;;
+			--no-reload) no_reload=1; shift ;;
+			*) die "Unknown system tls option: $1" ;;
+		esac
+	done
+	[ -n "$cert_dir" ] || die "system tls requires --cert-dir DIR."
+	validate_certificate_hostname "$cert_dir" "$hostname"
+
+	old_hostname=$(metadata_get canonical_mail_hostname || true)
+	old_cert_dir=$(metadata_get canonical_cert_dir || true)
+	metadata_set canonical_mail_hostname "$hostname"
+	metadata_set canonical_cert_dir "$cert_dir"
+
+	if [ "$(active_domain_count)" -gt 0 ]; then
+		if ! render_all; then
+			if [ -n "$old_hostname" ] && [ -n "$old_cert_dir" ]; then
+				metadata_set canonical_mail_hostname "$old_hostname"
+				metadata_set canonical_cert_dir "$old_cert_dir"
+				render_all || warn "Could not restore the previous generated configuration automatically."
+			else
+				metadata_delete canonical_mail_hostname
+				metadata_delete canonical_cert_dir
+			fi
+			die "Configuration rendering failed; canonical TLS metadata was rolled back."
+		fi
+		[ "$no_reload" -eq 1 ] || reload_services
+	fi
+	say "Canonical mail TLS identity set to $hostname using $cert_dir."
 }
 
 require_active_domains() {
@@ -370,29 +457,15 @@ validate_certificate_hostname() {
 }
 
 render_dovecot_tls_23() {
-	first=1
-	sql "SELECT mail_hostname || '|' || cert_dir FROM domains WHERE enabled = 1 ORDER BY id;" |
-	while IFS='|' read -r hostname cert_dir; do
-		validate_certificate_hostname "$cert_dir" "$hostname"
-		if [ "$first" -eq 1 ]; then
-			printf 'ssl_cert = <%s/fullchain.pem\nssl_key = <%s/privkey.pem\n' "$cert_dir" "$cert_dir"
-			first=0
-		fi
-		printf '\nlocal_name %s {\n\tssl_cert = <%s/fullchain.pem\n\tssl_key = <%s/privkey.pem\n}\n' "$hostname" "$cert_dir" "$cert_dir"
-	done
+	load_canonical_tls
+	printf 'ssl_cert = <%s/fullchain.pem\nssl_key = <%s/privkey.pem\n' \
+		"$CANONICAL_CERT_DIR" "$CANONICAL_CERT_DIR"
 }
 
 render_dovecot_tls_24() {
-	first=1
-	sql "SELECT mail_hostname || '|' || cert_dir FROM domains WHERE enabled = 1 ORDER BY id;" |
-	while IFS='|' read -r hostname cert_dir; do
-		validate_certificate_hostname "$cert_dir" "$hostname"
-		if [ "$first" -eq 1 ]; then
-			printf 'ssl_server_cert_file = %s/fullchain.pem\nssl_server_key_file = %s/privkey.pem\n' "$cert_dir" "$cert_dir"
-			first=0
-		fi
-		printf '\nlocal_name %s {\n\tssl_server_cert_file = %s/fullchain.pem\n\tssl_server_key_file = %s/privkey.pem\n}\n' "$hostname" "$cert_dir" "$cert_dir"
-	done
+	load_canonical_tls
+	printf 'ssl_server_cert_file = %s/fullchain.pem\nssl_server_key_file = %s/privkey.pem\n' \
+		"$CANONICAL_CERT_DIR" "$CANONICAL_CERT_DIR"
 }
 
 render_dovecot_23() {
@@ -619,25 +692,13 @@ render_dovecot() {
 	metadata_set dovecot_family "$DOVECOT_FAMILY"
 }
 
-render_postfix_sni() {
-	require_active_domains
-	mkdir -p "$POSTFIX_DIR"
-	tmp_map=$(mktemp "$POSTFIX_DIR/.emailwiz-sni.XXXXXX")
-	sql "SELECT mail_hostname || '|' || cert_dir FROM domains WHERE enabled = 1 ORDER BY id;" |
-	while IFS='|' read -r hostname cert_dir; do
-		validate_certificate_hostname "$cert_dir" "$hostname"
-		printf '%s %s/privkey.pem %s/fullchain.pem\n' "$hostname" "$cert_dir" "$cert_dir"
-	done > "$tmp_map"
-	chmod 0600 "$tmp_map"
-	postmap -F "hash:$tmp_map"
-	mv "$tmp_map" "$POSTFIX_SNI_MAP"
-	mv "$tmp_map.db" "$POSTFIX_SNI_MAP.db"
-	chmod 0600 "$POSTFIX_SNI_MAP" "$POSTFIX_SNI_MAP.db"
-
-	default_cert=$(sql "SELECT cert_dir FROM domains WHERE enabled = 1 ORDER BY id LIMIT 1;")
-	postconf -e "smtpd_tls_key_file=$default_cert/privkey.pem"
-	postconf -e "smtpd_tls_cert_file=$default_cert/fullchain.pem"
-	postconf -e "tls_server_sni_maps=hash:$POSTFIX_SNI_MAP"
+render_postfix_tls() {
+	load_canonical_tls
+	postconf -e "myhostname=$CANONICAL_MAIL_HOSTNAME"
+	postconf -e "smtpd_tls_key_file=$CANONICAL_CERT_DIR/privkey.pem"
+	postconf -e "smtpd_tls_cert_file=$CANONICAL_CERT_DIR/fullchain.pem"
+	# Clear any SNI map left by the earlier per-domain certificate model.
+	postconf -e 'tls_server_sni_maps ='
 }
 
 render_opendkim_tables() {
@@ -660,7 +721,7 @@ render_opendkim_tables() {
 render_all() {
 	write_postfix_lookup_configs
 	render_dovecot
-	render_postfix_sni
+	render_postfix_tls
 	render_opendkim_tables
 }
 
@@ -692,52 +753,10 @@ system_version() {
 	detect_dovecot
 	configured=$(metadata_get dovecot_family || true)
 	spamassassin=$(metadata_get spamassassin_enabled || true)
-	printf 'installed=%s\ndetected_family=%s\nconfigured_family=%s\nspamassassin=%s\n' \
-		"$DOVECOT_VERSION" "$DOVECOT_FAMILY" "${configured:-not-rendered}" "${spamassassin:-no}"
-}
-
-obtain_letsencrypt_certificate() {
-	hostname=$1
-	cert_dir="/etc/letsencrypt/live/$hostname"
-	if [ -f "$cert_dir/fullchain.pem" ] && [ -f "$cert_dir/privkey.pem" ]; then
-		printf '%s\n' "$cert_dir"
-		return
-	fi
-	require_command certbot
-	case "$(netstat -tulpn 2>/dev/null | grep ':80[[:space:]]' || true)" in
-		*nginx*)
-			apt-get install -y python3-certbot-nginx
-			certbot -d "$hostname" certonly --nginx --register-unsafely-without-email --agree-tos
-			;;
-		*apache*)
-			apt-get install -y python3-certbot-apache
-			certbot -d "$hostname" certonly --apache --register-unsafely-without-email --agree-tos
-			;;
-		*) certbot -d "$hostname" certonly --standalone --register-unsafely-without-email --agree-tos ;;
-	esac
-	validate_certificate_hostname "$cert_dir" "$hostname"
-	printf '%s\n' "$cert_dir"
-}
-
-require_mail_hostname_dns() {
-	hostname=$1
-	require_command host
-	addresses=$(host "$hostname" 2>/dev/null | awk '/ has address | has IPv6 address / { print $NF }')
-	[ -n "$addresses" ] || die "Create an A and/or AAAA record for $hostname before requesting its certificate."
-}
-
-create_selfsigned_certificate() {
-	hostname=$1
-	cert_dir="$CERT_ROOT/$hostname"
-	mkdir -p "$cert_dir"
-	if [ ! -f "$cert_dir/privkey.pem" ] || [ ! -f "$cert_dir/fullchain.pem" ]; then
-		openssl req -x509 -newkey rsa:4096 -sha256 -days 36500 -nodes \
-			-subj "/CN=$hostname" -addext "subjectAltName=DNS:$hostname" \
-			-keyout "$cert_dir/privkey.pem" -out "$cert_dir/fullchain.pem"
-		chmod 0600 "$cert_dir/privkey.pem"
-		chmod 0644 "$cert_dir/fullchain.pem"
-	fi
-	printf '%s\n' "$cert_dir"
+	canonical_hostname=$(metadata_get canonical_mail_hostname || true)
+	printf 'installed=%s\ndetected_family=%s\nconfigured_family=%s\nspamassassin=%s\ncanonical_mail_hostname=%s\n' \
+		"$DOVECOT_VERSION" "$DOVECOT_FAMILY" "${configured:-not-rendered}" "${spamassassin:-no}" \
+		"${canonical_hostname:-not-configured}"
 }
 
 ensure_dkim_key() {
@@ -779,41 +798,21 @@ domain_add() {
 	domain=$(normalize_domain "$1")
 	shift
 	validate_domain "$domain"
-	cert_dir=''
 	no_reload=0
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
-			--cert-dir)
-				[ "$#" -ge 2 ] || die "--cert-dir requires a value."
-				cert_dir=$2
-				shift 2
-				;;
 			--no-reload) no_reload=1; shift ;;
 			*) die "Unknown domain add option: $1" ;;
 		esac
 	done
 	domain_exists "$domain" && die "Domain already exists. Use '$PROGRAM domain enable $domain' if it is disabled."
 
-	hostname="mail.$domain"
-	if [ -z "$cert_dir" ]; then
-		mode=$(metadata_get certificate_mode)
-		case "$mode" in
-			letsencrypt)
-				require_mail_hostname_dns "$hostname"
-				cert_dir=$(obtain_letsencrypt_certificate "$hostname")
-				;;
-			selfsigned) cert_dir=$(create_selfsigned_certificate "$hostname") ;;
-			*) die "Unknown certificate mode in database: $mode" ;;
-		esac
-	fi
-	validate_certificate_hostname "$cert_dir" "$hostname"
+	load_canonical_tls
 	selector=mail
 	ensure_dkim_key "$domain" "$selector"
 
 	q_domain=$(sql_escape "$domain")
-	q_hostname=$(sql_escape "$hostname")
-	q_cert_dir=$(sql_escape "$cert_dir")
-	sql "INSERT INTO domains(name, mail_hostname, cert_dir, dkim_selector) VALUES('$q_domain', '$q_hostname', '$q_cert_dir', '$selector');"
+	sql "INSERT INTO domains(name, dkim_selector) VALUES('$q_domain', '$selector');"
 	if ! render_all; then
 		sql "DELETE FROM domains WHERE name = '$q_domain';" || true
 		if [ "$(active_domain_count)" -gt 0 ]; then
@@ -822,7 +821,7 @@ domain_add() {
 		die "Configuration rendering failed; the domain database row was rolled back."
 	fi
 	[ "$no_reload" -eq 1 ] || reload_services
-	write_dns_records "$domain" "$hostname" "$selector"
+	write_dns_records "$domain" "$CANONICAL_MAIL_HOSTNAME" "$selector"
 }
 
 domain_list() {
@@ -833,7 +832,7 @@ domain_list() {
 	done
 	where='WHERE enabled = 1'
 	[ "$all" -eq 0 ] || where=''
-	"$SQLITE3" -header -column "$DB_PATH" "SELECT name AS domain, mail_hostname, CASE enabled WHEN 1 THEN 'active' ELSE 'disabled' END AS status, cert_dir FROM domains $where ORDER BY name;"
+	"$SQLITE3" -header -column "$DB_PATH" "SELECT name AS domain, CASE enabled WHEN 1 THEN 'active' ELSE 'disabled' END AS status, dkim_selector FROM domains $where ORDER BY name;"
 }
 
 safe_remove_dkim_dir() {
@@ -845,26 +844,6 @@ safe_remove_dkim_dir() {
 	expected=$(readlink -f "$DKIM_ROOT")/$domain
 	[ "$resolved" = "$expected" ] || die "Refusing to purge unexpected DKIM path: $resolved"
 	find -P "$target" -xdev -depth -delete
-}
-
-purge_certificate() {
-	hostname=$1
-	cert_dir=$2
-	mode=$(metadata_get certificate_mode)
-	case "$mode:$cert_dir" in
-		letsencrypt:/etc/letsencrypt/live/*)
-			cert_name=${cert_dir##*/}
-			certbot delete --cert-name "$cert_name" --non-interactive
-			;;
-		selfsigned:"$CERT_ROOT"/*)
-			[ ! -L "$cert_dir" ] || die "Refusing to purge symlinked certificate directory: $cert_dir"
-			resolved=$(readlink -f "$cert_dir")
-			expected=$(readlink -f "$CERT_ROOT")/$hostname
-			[ "$resolved" = "$expected" ] || die "Refusing to purge unexpected certificate path: $resolved"
-			find -P "$cert_dir" -xdev -depth -delete
-			;;
-		*) warn "Certificate directory is externally managed and was retained: $cert_dir" ;;
-	esac
 }
 
 domain_delete() {
@@ -894,8 +873,6 @@ domain_delete() {
 	if [ "$was_active" -eq 1 ] && [ "$(active_domain_count)" -le 1 ]; then
 		die "Cannot disable the last active domain. Add or enable another domain first."
 	fi
-	hostname=$(sql "SELECT mail_hostname FROM domains WHERE name = '$q_domain';")
-	cert_dir=$(sql "SELECT cert_dir FROM domains WHERE name = '$q_domain';")
 	sql "UPDATE domains SET enabled = 0, deleted_at = CURRENT_TIMESTAMP WHERE name = '$q_domain';"
 	if [ "$was_active" -eq 1 ]; then
 		if ! render_all; then
@@ -908,12 +885,11 @@ domain_delete() {
 	if [ "$purge" -eq 1 ]; then
 		sql "DELETE FROM domains WHERE name = '$q_domain';"
 		safe_remove_dkim_dir "$domain"
-		purge_certificate "$hostname" "$cert_dir"
 	fi
 	if [ "$purge" -eq 1 ]; then
-		say "Purged domain $domain and its DKIM key. Certificate cleanup was applied when Emailwiz owned the certificate directory."
+		say "Purged domain $domain and its DKIM key. The system TLS certificate was retained."
 	else
-		say "Disabled domain $domain; mail data, DKIM key, and certificate were retained."
+		say "Disabled domain $domain; mail data and DKIM key were retained."
 	fi
 }
 
@@ -930,10 +906,8 @@ domain_enable() {
 	done
 	domain_exists "$domain" || die "Domain does not exist: $domain"
 	q_domain=$(sql_escape "$domain")
-	cert_dir=$(sql "SELECT cert_dir FROM domains WHERE name = '$q_domain';")
 	selector=$(sql "SELECT dkim_selector FROM domains WHERE name = '$q_domain';")
-	hostname=$(sql "SELECT mail_hostname FROM domains WHERE name = '$q_domain';")
-	validate_certificate_hostname "$cert_dir" "$hostname"
+	load_canonical_tls
 	ensure_dkim_key "$domain" "$selector"
 	sql "UPDATE domains SET enabled = 1, deleted_at = NULL WHERE name = '$q_domain';"
 	if ! render_all; then
@@ -1185,6 +1159,7 @@ main() {
 			shift
 			case "$command_name" in
 				init) system_init "$@" ;;
+				tls) system_tls "$@" ;;
 				render) system_render "$@" ;;
 				version) [ "$#" -eq 0 ] || die "system version takes no arguments."; system_version ;;
 				*) die "Unknown system subcommand: $command_name" ;;

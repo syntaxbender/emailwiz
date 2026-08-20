@@ -12,8 +12,7 @@ trap cleanup EXIT HUP INT TERM
 
 bin_dir="$test_root/bin"
 mkdir -p "$bin_dir" "$test_root/etc/dovecot" "$test_root/etc/postfix/dkim" \
-	"$test_root/home/alice" "$test_root/home/bob" "$test_root/certs/mail.example.com" \
-	"$test_root/certs/mail.example.net"
+	"$test_root/home/alice" "$test_root/home/bob" "$test_root/certs/mail.example.com"
 
 uid=$(id -u)
 gid=$(id -g)
@@ -96,8 +95,6 @@ EOF
 chmod +x "$bin_dir"/* "$repo_dir/tests/sqlite3-shim.py"
 printf 'certificate\n' > "$test_root/certs/mail.example.com/fullchain.pem"
 printf 'key\n' > "$test_root/certs/mail.example.com/privkey.pem"
-printf 'certificate\n' > "$test_root/certs/mail.example.net/fullchain.pem"
-printf 'key\n' > "$test_root/certs/mail.example.net/privkey.pem"
 : > "$test_root/etc/dovecot/dovecot.conf"
 : > "$test_root/commands.log"
 
@@ -110,12 +107,10 @@ export EMAILWIZ_DNS_DIR="$test_root/state/dns"
 export EMAILWIZ_DOVECOT_CONF="$test_root/etc/dovecot/dovecot.conf"
 export EMAILWIZ_DOVECOT_SQL_CONF="$test_root/etc/dovecot/emailwiz-sql.conf.ext"
 export EMAILWIZ_POSTFIX_DIR="$test_root/etc/postfix"
-export EMAILWIZ_POSTFIX_SNI_MAP="$test_root/etc/postfix/emailwiz-sni"
 export EMAILWIZ_OPENDKIM_KEYTABLE="$test_root/etc/postfix/dkim/keytable"
 export EMAILWIZ_OPENDKIM_SIGNINGTABLE="$test_root/etc/postfix/dkim/signingtable"
 export EMAILWIZ_DKIM_ROOT="$test_root/etc/postfix/dkim"
 export EMAILWIZ_SIEVE_DIR="$test_root/state/sieve"
-export EMAILWIZ_CERT_ROOT="$test_root/certs"
 export EMAILWIZ_RENEW_HOOK="$test_root/renewal-hooks/deploy/emailwiz"
 export EMAILWIZ_HOME_ROOT="$test_root/home"
 export SQLITE3="$bin_dir/sqlite3"
@@ -144,6 +139,15 @@ assert_sql() {
 MOCK_DOVECOT_VERSION=2.3.16 "$ctl" system init
 assert_sql no "SELECT value FROM metadata WHERE key = 'spamassassin_enabled';"
 assert_contains 'keep;' "$EMAILWIZ_SIEVE_DIR/default.sieve"
+if MOCK_DOVECOT_VERSION=2.3.16 "$ctl" domain add example.com --no-reload >/dev/null 2>&1; then
+	printf 'A domain was unexpectedly added before canonical TLS was configured.\n' >&2
+	exit 1
+fi
+assert_sql 0 'SELECT COUNT(*) FROM domains;'
+MOCK_DOVECOT_VERSION=2.3.16 "$ctl" system tls mail.example.com \
+	--cert-dir "$test_root/certs/mail.example.com" --no-reload
+assert_sql mail.example.com "SELECT value FROM metadata WHERE key = 'canonical_mail_hostname';"
+assert_sql "$test_root/certs/mail.example.com" "SELECT value FROM metadata WHERE key = 'canonical_cert_dir';"
 if grep -F 'X-Spam-Flag' "$EMAILWIZ_SIEVE_DIR/default.sieve" >/dev/null; then
 	printf 'Disabled SpamAssassin unexpectedly installed the global spam Sieve rule.\n' >&2
 	exit 1
@@ -162,17 +166,21 @@ sh "$repo_dir/emailwiz.sh" --help | grep -F -- '--with-spamassassin' >/dev/null 
 	printf 'Installer help does not document the SpamAssassin option.\n' >&2
 	exit 1
 }
-MOCK_DOVECOT_VERSION=2.3.16 "$ctl" domain add example.com \
-	--cert-dir "$test_root/certs/mail.example.com" --no-reload
-MOCK_DOVECOT_VERSION=2.3.16 "$ctl" domain add example.net \
-	--cert-dir "$test_root/certs/mail.example.net" --no-reload
+MOCK_DOVECOT_VERSION=2.3.16 "$ctl" domain add example.com --no-reload
+MOCK_DOVECOT_VERSION=2.3.16 "$ctl" domain add example.net --no-reload
 
 assert_contains 'auth_username_format = %Lu' "$EMAILWIZ_DOVECOT_CONF"
 assert_contains 'driver = sqlite' "$EMAILWIZ_DOVECOT_SQL_CONF"
-assert_contains 'local_name mail.example.net {' "$EMAILWIZ_DOVECOT_CONF"
-assert_contains 'mail.example.com' "$EMAILWIZ_POSTFIX_SNI_MAP"
-assert_contains 'mail.example.net' "$EMAILWIZ_POSTFIX_SNI_MAP"
+assert_contains "ssl_cert = <$test_root/certs/mail.example.com/fullchain.pem" "$EMAILWIZ_DOVECOT_CONF"
+if grep -F 'local_name ' "$EMAILWIZ_DOVECOT_CONF" >/dev/null; then
+	printf 'Canonical TLS configuration unexpectedly contains a per-domain local_name block.\n' >&2
+	exit 1
+fi
+assert_contains "smtpd_tls_cert_file=$test_root/certs/mail.example.com/fullchain.pem" "$MOCK_COMMAND_LOG"
+assert_contains 'myhostname=mail.example.com' "$MOCK_COMMAND_LOG"
+assert_contains 'tls_server_sni_maps =' "$MOCK_COMMAND_LOG"
 assert_sql 2 'SELECT COUNT(*) FROM domains WHERE enabled = 1;'
+assert_sql 0 "SELECT COUNT(*) FROM pragma_table_info('domains') WHERE name IN ('mail_hostname', 'cert_dir');"
 cp "$EMAILWIZ_DOVECOT_CONF" "$test_root/dovecot-2.3.conf"
 cp "$EMAILWIZ_DOVECOT_SQL_CONF" "$test_root/emailwiz-sql-2.3.conf.ext"
 
@@ -256,5 +264,76 @@ if MOCK_DOVECOT_VERSION=2.4.2 "$ctl" domain delete example.com --no-reload >/dev
 fi
 
 assert_contains 'v=spf1 mx a:mail.example.com -all' "$EMAILWIZ_DNS_DIR/example.com.txt"
+assert_contains 'v=spf1 mx a:mail.example.com -all' "$EMAILWIZ_DNS_DIR/example.net.txt"
+assert_contains "$(printf 'example.net\tMX\t10\tmail.example.com\t300')" "$EMAILWIZ_DNS_DIR/example.net.txt"
+
+# Version 1 databases are upgraded from per-domain TLS columns to one
+# canonical system TLS identity without losing domain or mailbox rows.
+migration_root="$test_root/migration"
+migration_db="$migration_root/state/emailwiz.sqlite3"
+mkdir -p "$migration_root/state" "$migration_root/etc/dovecot" \
+	"$migration_root/etc/postfix/dkim" "$migration_root/sieve"
+: > "$migration_root/etc/dovecot/dovecot.conf"
+"$bin_dir/sqlite3" "$migration_db" <<EOF
+CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO metadata VALUES('certificate_mode', 'letsencrypt');
+CREATE TABLE domains (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    mail_hostname TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    cert_dir TEXT NOT NULL,
+    dkim_selector TEXT NOT NULL DEFAULT 'mail',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TEXT
+);
+CREATE TABLE mail_users (
+    id INTEGER PRIMARY KEY,
+    domain_id INTEGER NOT NULL REFERENCES domains(id) ON DELETE RESTRICT,
+    localpart TEXT NOT NULL COLLATE NOCASE,
+    email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    password_hash TEXT NOT NULL,
+    home_path TEXT NOT NULL,
+    uid INTEGER NOT NULL,
+    gid INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TEXT,
+    UNIQUE(domain_id, localpart)
+);
+INSERT INTO domains(id, name, mail_hostname, cert_dir)
+VALUES(7, 'legacy.example', 'mail.legacy.example', '$test_root/certs/mail.example.com');
+INSERT INTO mail_users(id, domain_id, localpart, email, password_hash, home_path, uid, gid)
+VALUES(9, 7, 'alice', 'alice@legacy.example', 'hash', '$test_root/home/alice', $uid, $gid);
+EOF
+EMAILWIZ_STATE_DIR="$migration_root/state" \
+EMAILWIZ_DB_PATH="$migration_db" \
+EMAILWIZ_DNS_DIR="$migration_root/state/dns" \
+EMAILWIZ_DOVECOT_CONF="$migration_root/etc/dovecot/dovecot.conf" \
+EMAILWIZ_DOVECOT_SQL_CONF="$migration_root/etc/dovecot/emailwiz-sql.conf.ext" \
+EMAILWIZ_POSTFIX_DIR="$migration_root/etc/postfix" \
+EMAILWIZ_OPENDKIM_KEYTABLE="$migration_root/etc/postfix/dkim/keytable" \
+EMAILWIZ_OPENDKIM_SIGNINGTABLE="$migration_root/etc/postfix/dkim/signingtable" \
+EMAILWIZ_DKIM_ROOT="$migration_root/etc/postfix/dkim" \
+EMAILWIZ_SIEVE_DIR="$migration_root/sieve" \
+EMAILWIZ_RENEW_HOOK="$migration_root/renewal-hooks/deploy/emailwiz" \
+MOCK_DOVECOT_VERSION=2.3.16 "$ctl" system init
+[ "$("$bin_dir/sqlite3" "$migration_db" "SELECT value FROM metadata WHERE key = 'canonical_mail_hostname';")" = mail.legacy.example ] || {
+	printf 'Legacy canonical hostname was not migrated.\n' >&2
+	exit 1
+}
+[ "$("$bin_dir/sqlite3" "$migration_db" "SELECT COUNT(*) FROM mail_users WHERE id = 9 AND domain_id = 7;")" = 1 ] || {
+	printf 'Legacy mailbox row was not retained during migration.\n' >&2
+	exit 1
+}
+[ "$("$bin_dir/sqlite3" "$migration_db" "SELECT COUNT(*) FROM pragma_table_info('domains') WHERE name IN ('mail_hostname', 'cert_dir');")" = 0 ] || {
+	printf 'Legacy per-domain TLS columns were not removed.\n' >&2
+	exit 1
+}
+[ -z "$("$bin_dir/sqlite3" "$migration_db" 'PRAGMA foreign_key_check;')" ] || {
+	printf 'Legacy migration left invalid foreign keys.\n' >&2
+	exit 1
+}
+
 printf 'emailwizctl integration tests passed\n'
 [ "${EMAILWIZ_TEST_KEEP_ROOT:-0}" != 1 ] || printf 'test_root=%s\n' "$test_root"

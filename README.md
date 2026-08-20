@@ -12,7 +12,7 @@ and SQLite stores virtual domains and mailbox identities.
 | Dovecot IMAP/POP3/LMTP + `dovecot-sqlite` | Client access, SQLite password authentication and delivery as the mapped Unix UID/GID |
 | SQLite | Virtual domain, mailbox, password-hash and home-path database |
 | OpenDKIM | A separate DKIM key and signing rule for every hosted domain |
-| Certbot | A separate certificate for every `mail.<domain>` hostname |
+| Certbot | One certificate for the server's canonical mail hostname |
 | SpamAssassin (optional) | Inbound spam classification when explicitly enabled during installation |
 | Pigeonhole Sieve | User filtering; moves SpamAssassin-marked messages into `Junk` when that option is enabled |
 | Fail2ban | Postfix and Dovecot login protection |
@@ -112,23 +112,25 @@ Before installation:
 3. Ensure ports 25, 80, 110, 465, 587, 993 and 995 are allowed by the hosting provider.
 4. Configure PTR/rDNS for the server's primary mail hostname.
 
-The installer initializes SQLite, adds the initial domain, generates its DKIM
-key, obtains its TLS certificate and prints the required MX/SPF/DKIM/DMARC
-records. DNS output is retained under `/var/lib/emailwiz/dns/`.
+The installer initializes SQLite, obtains one TLS certificate for the canonical
+mail hostname, adds the initial domain, generates its DKIM key and prints the
+required MX/SPF/DKIM/DMARC records. DNS output is retained under
+`/var/lib/emailwiz/dns/`.
 
 For an isolated installation, set `selfsigned="yes"` near the top of
-`emailwiz.sh` before running it. Initial and later domain certificates will then
-be generated under `/etc/emailwiz/certs/`; public clients will not trust them
-unless their CA/trust configuration is managed separately.
+`emailwiz.sh` before running it. The canonical certificate will then be
+generated under `/etc/emailwiz/certs/`; public clients will not trust it unless
+their CA/trust configuration is managed separately.
 
 The old standalone `adddomain.sh` command remains as a compatibility wrapper
 for `emailwizctl domain add`.
 
 ## Domain management
 
-Each domain uses `mail.<domain>` as its MX/client hostname. Postfix and Dovecot
-select that domain's certificate with TLS SNI. The hostname needs an A or AAAA
-record before Certbot can issue the certificate.
+All hosted domains use the canonical hostname selected during installation,
+such as `mail.example.com`, for MX and client connections. Only that hostname
+needs an A/AAAA record and TLS certificate. Every hosted domain still receives
+its own DKIM key, SPF record and DMARC record.
 
 ```sh
 sudo emailwizctl domain add example.net
@@ -136,15 +138,18 @@ sudo emailwizctl domain list
 sudo emailwizctl domain list --all
 ```
 
-If a certificate is managed externally, provide its directory. It must contain
-`fullchain.pem` and `privkey.pem`:
+To replace or externally manage the system certificate, configure it at the
+system level and then render the services. The certificate must cover the
+canonical hostname and its directory must contain `fullchain.pem` and
+`privkey.pem`:
 
 ```sh
-sudo emailwizctl domain add example.net --cert-dir /etc/custom-certs/mail.example.net
+sudo emailwizctl system tls mail.example.com \
+  --cert-dir /etc/custom-certs/mail.example.com
 ```
 
 Domain deletion is soft by default. It disables reception/login while keeping
-the certificate, DKIM key and every mailbox record:
+the DKIM key and every mailbox record:
 
 ```sh
 sudo emailwizctl domain delete example.net
@@ -157,9 +162,9 @@ Permanent deletion requires all users under the domain to be purged first:
 sudo emailwizctl domain delete example.net --purge
 ```
 
-`--purge` removes the database domain and its DKIM material. It removes a
-certificate only when it is inside an Emailwiz-managed Certbot or self-signed
-location; external certificate directories are retained.
+`--purge` removes the database domain and its DKIM material. The canonical
+system certificate is never owned by an individual domain and is therefore
+never removed by domain deletion.
 
 ## Mailbox management
 
@@ -196,20 +201,20 @@ home directory. Symlinked or unexpected paths are rejected.
 
 ## Client settings
 
-For `alice@example.com` use the full email address as the username:
+For `alice@example.net` use the full email address as the username and the
+server's canonical hostname (here `mail.example.com`) for both protocols:
 
 | Setting | Value |
 | --- | --- |
-| Username | `alice@example.com` |
+| Username | `alice@example.net` |
 | SMTP server | `mail.example.com` |
 | SMTP port | 465 (implicit TLS) or 587 (STARTTLS) |
 | IMAP server | `mail.example.com` |
 | IMAP port | 993 |
 
-Per-domain certificates rely on client TLS SNI support. Current Thunderbird,
-K-9, Apple Mail, Mutt and NeoMutt support it; very old clients such as Outlook
-2013 do not. Dovecot lists the known compatibility caveats in its [SNI
-documentation](https://doc.dovecot.org/2.4.3/core/config/ssl.html#with-client-tls-sni-server-name-indication-support).
+The same hostname should also be used for PTR/rDNS and Postfix's SMTP
+identity. Hosted address domains remain independent in SQLite even though they
+share this transport identity.
 
 ## Tests
 
@@ -223,5 +228,6 @@ tests/test_emailwizctl.sh
 EMAILWIZ_DOCKER_TEST=1 tests/test_emailwizctl.sh
 ```
 
-It covers both generated Dovecot syntax families, SQLite mappings, multi-domain
-TLS maps, UID/GID home mapping, soft deletion and guarded purge behavior.
+It covers both generated Dovecot syntax families, SQLite mappings, canonical
+TLS with multiple hosted domains, UID/GID home mapping, soft deletion and
+guarded purge behavior.

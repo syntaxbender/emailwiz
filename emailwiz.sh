@@ -163,7 +163,9 @@ fi
 
 [ ! -d "$certdir" ] && echo "Error locating or installing SSL certificate." && exit 1
 
-emailwizctl domain add "$domain" --cert-dir "$certdir" --no-reload
+# TLS identity belongs to the mail system, not to an individual hosted domain.
+emailwizctl system tls "$maildomain" --cert-dir "$certdir" --no-reload
+emailwizctl domain add "$domain" --no-reload
 
 echo "Configuring Postfix's main.cf..."
 
