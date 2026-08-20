@@ -331,14 +331,6 @@ EOF
 	chmod 0755 "$RENEW_HOOK"
 }
 
-warn_legacy_mailboxes() {
-	legacy=$(find "$HOME_ROOT" -mindepth 2 -maxdepth 2 -type d -name Mail -not -empty -print 2>/dev/null || true)
-	if [ -n "$legacy" ]; then
-		warn "Existing non-empty Mail directories were found. They were not migrated or modified:"
-		printf '%s\n' "$legacy" >&2
-	fi
-}
-
 system_init() {
 	require_root
 	mode=''
@@ -383,7 +375,6 @@ system_init() {
 	if [ -f "$DOVECOT_CONF" ] && [ ! -f "$DOVECOT_CONF.pre-emailwiz" ]; then
 		cp -p "$DOVECOT_CONF" "$DOVECOT_CONF.pre-emailwiz"
 	fi
-	warn_legacy_mailboxes
 	say "Initialized Emailwiz database at $DB_PATH (Dovecot $DOVECOT_VERSION, config family $DOVECOT_FAMILY)."
 }
 
