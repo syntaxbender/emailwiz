@@ -40,8 +40,12 @@ validate_localpart() {
 	[ -n "$localpart" ] || die "Email local part cannot be empty."
 	[ ${#localpart} -le 64 ] || die "Email local part is longer than 64 characters."
 	case "$localpart" in
-		.*|*.|*..*|*[!a-z0-9._%+-]*) die "Unsupported email local part: $localpart" ;;
+		.*|*.|*..*|*[!a-z0-9.]*) die "Unsupported email local part: $localpart (only letters, digits and dots are allowed)" ;;
 	esac
+}
+
+canonicalize_localpart() {
+	printf '%s' "$1" | tr -d '.'
 }
 
 normalize_address() {

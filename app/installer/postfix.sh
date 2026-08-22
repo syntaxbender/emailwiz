@@ -43,6 +43,7 @@ emailwiz_installer_configure_postfix() {
 	postconf -e 'virtual_mailbox_domains = proxy:sqlite:/etc/postfix/emailwiz-virtual-domains.cf'
 	postconf -e 'virtual_mailbox_maps = proxy:sqlite:/etc/postfix/emailwiz-virtual-mailboxes.cf'
 	postconf -e 'virtual_transport = lmtp:unix:private/dovecot-lmtp'
+	postconf -e 'recipient_delimiter = +'
 	postconf -e 'mailbox_command ='
 
 	postconf -e 'header_checks = regexp:/etc/postfix/header_checks'

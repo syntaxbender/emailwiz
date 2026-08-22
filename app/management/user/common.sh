@@ -82,6 +82,19 @@ prepare_mail_home() {
 	chown "$uid:$gid" "$mail_dir"
 }
 
+validate_existing_mail_home() {
+	home=$1
+	expected_uid=$2
+	expected_gid=$3
+	mail_dir="$home/Mail"
+	[ -d "$mail_dir" ] || die "Managed Mail directory does not exist: $mail_dir"
+	[ ! -L "$mail_dir" ] || die "Symlinked Mail directories are not supported: $mail_dir"
+	mail_uid=$(stat -c %u "$mail_dir")
+	mail_gid=$(stat -c %g "$mail_dir")
+	[ "$mail_uid|$mail_gid" = "$expected_uid|$expected_gid" ] ||
+		die "Managed Mail directory $mail_dir is owned by UID/GID $mail_uid/$mail_gid, expected $expected_uid/$expected_gid."
+}
+
 read_password() {
 	from_stdin=$1
 	if [ "$from_stdin" -eq 1 ]; then

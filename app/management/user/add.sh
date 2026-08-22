@@ -22,16 +22,23 @@ user_add() {
 	[ -n "$unix_user" ] || die "user add requires --unix-user USER."
 	domain=${address#*@}
 	localpart=${address%@*}
+	canonical_localpart=$(canonicalize_localpart "$localpart")
 	domain_is_active "$domain" || die "Domain is not active: $domain"
 	q_address=$(sql_escape "$address")
-	[ "$(sql "SELECT COUNT(*) FROM mail_users WHERE email = '$q_address';")" -eq 0 ] || die "User already exists: $address"
-	resolve_unix_user "$unix_user"
-	read_password "$password_stdin"
-	prepare_mail_home "$home" "$uid" "$gid"
 	q_domain=$(sql_escape "$domain")
+	q_canonical_localpart=$(sql_escape "$canonical_localpart")
+	conflicting_address=$(sql "SELECT u.email FROM mail_users u JOIN domains d ON d.id = u.domain_id WHERE d.name = '$q_domain' AND u.canonical_localpart = '$q_canonical_localpart' LIMIT 1;")
+	[ -z "$conflicting_address" ] || die "Address conflicts with existing dotted identity: $conflicting_address"
+	resolve_unix_user "$unix_user"
+	q_home=$(sql_escape "$home")
+	mailbox_row=$(sql "SELECT id || '|' || uid || '|' || gid FROM mailboxes WHERE home_path = '$q_home';")
+	[ -z "$mailbox_row" ] || die "The Unix user's mailbox is already managed. Add another address with '$PROGRAM alias add ADDRESS --to TARGET'."
+	read_password "$password_stdin"
 	q_localpart=$(sql_escape "$localpart")
 	q_hash=$(sql_escape "$password_hash")
-	q_home=$(sql_escape "$home")
-	sql "INSERT INTO mail_users(domain_id, localpart, email, password_hash, home_path, uid, gid) SELECT id, '$q_localpart', '$q_address', '$q_hash', '$q_home', $uid, $gid FROM domains WHERE name = '$q_domain' AND enabled = 1;"
-	say "Created virtual mailbox $address -> $home/Mail (Unix owner: $unix_user, UID $uid, GID $gid)."
+	prepare_mail_home "$home" "$uid" "$gid"
+	sql "INSERT INTO mailboxes(storage_id, home_path, uid, gid) VALUES(lower(hex(randomblob(16))), '$q_home', $uid, $gid);"
+	mailbox_id=$(sql "SELECT id FROM mailboxes WHERE home_path = '$q_home';")
+	sql "INSERT INTO mail_users(mailbox_id, domain_id, localpart, canonical_localpart, email, password_hash) SELECT $mailbox_id, id, '$q_localpart', '$q_canonical_localpart', '$q_address', '$q_hash' FROM domains WHERE name = '$q_domain' AND enabled = 1;"
+	say "Created mail user $address -> $home/Mail (Unix owner: $unix_user, UID $uid, GID $gid)."
 }

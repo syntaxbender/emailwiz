@@ -34,6 +34,8 @@
 . "$EMAILWIZ_APP_DIR/management/user/delete.sh"
 # shellcheck source=user/enable.sh
 . "$EMAILWIZ_APP_DIR/management/user/enable.sh"
+# shellcheck source=alias/add.sh
+. "$EMAILWIZ_APP_DIR/management/alias/add.sh"
 
 emailwiz_management_usage() {
 	cat <<'EOF'
@@ -53,6 +55,8 @@ Usage:
   emailwizctl user passwd ADDRESS [--password-stdin]
   emailwizctl user delete ADDRESS [--purge]
   emailwizctl user enable ADDRESS
+
+  emailwizctl alias add ADDRESS --to TARGET [--passwd|--password-stdin]
 
 Passwords are prompted for by default. Use --password-stdin for automation.
 All domains use the system's canonical mail hostname and TLS certificate.
@@ -100,6 +104,15 @@ emailwiz_management_main() {
 				delete) user_delete "$@" ;;
 				enable) user_enable "$@" ;;
 				*) die "Unknown user subcommand: $command_name" ;;
+			esac
+			;;
+		alias)
+			[ "$#" -gt 0 ] || die "alias requires a subcommand."
+			command_name=$1
+			shift
+			case "$command_name" in
+				add) alias_add "$@" ;;
+				*) die "Unknown alias subcommand: $command_name" ;;
 			esac
 			;;
 		-h|--help|help) emailwiz_management_usage ;;

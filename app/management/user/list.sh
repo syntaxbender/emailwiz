@@ -22,5 +22,5 @@ user_list() {
 		q_domain=$(sql_escape "$domain")
 		conditions="$conditions AND d.name = '$q_domain'"
 	fi
-	"$SQLITE3" -header -column "$DB_PATH" "SELECT u.email, u.home_path, u.uid, u.gid, CASE u.enabled WHEN 1 THEN 'active' ELSE 'disabled' END AS status, CASE d.enabled WHEN 1 THEN 'active' ELSE 'domain-disabled' END AS domain_status FROM mail_users u JOIN domains d ON d.id = u.domain_id WHERE $conditions ORDER BY u.email;"
+	"$SQLITE3" -header -column "$DB_PATH" "SELECT u.email, CASE WHEN u.password_hash IS NULL THEN 'no-login' ELSE 'login' END AS auth, m.home_path, m.uid, m.gid, CASE u.enabled WHEN 1 THEN 'active' ELSE 'disabled' END AS status, CASE d.enabled WHEN 1 THEN 'active' ELSE 'domain-disabled' END AS domain_status FROM mail_users u JOIN mailboxes m ON m.id = u.mailbox_id JOIN domains d ON d.id = u.domain_id WHERE $conditions ORDER BY u.email;"
 }
