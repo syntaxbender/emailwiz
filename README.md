@@ -51,11 +51,16 @@ sudo emailwizctl system version
 
 ## Storage and identity model
 
-A mailbox is a virtual email identity mapped to the home directory of one
-existing Unix user:
+Emailwiz separates public addresses, authentication credentials and physical
+mailboxes. A mailbox stores one opaque internal Dovecot identity plus the home
+path and UID/GID of one existing Unix user. Multiple public addresses may
+resolve to it:
 
 ```text
-alice@example.com -> /home/mehmet -> UID/GID from /etc/passwd
+alice@example.com + password --------+
+support@example.net + password ------+-> one internal Dovecot user
+info@example.net + no password -------+             |
+                                                    +-> /home/mehmet/Mail
 ```
 
 Mail stays in the original Emailwiz layout:
@@ -66,9 +71,20 @@ Mail stays in the original Emailwiz layout:
 ```
 
 The Unix account must already exist. Emailwiz never creates it and never reads
-or copies its `/etc/shadow` password. Dovecot authenticates the full email
-address against a hash in `/var/lib/emailwiz/emailwiz.sqlite3`, then uses the
-stored UID/GID to access that user's mail files.
+or copies its `/etc/shadow` password. Public login addresses are authenticated
+against their own SQLite password hash and then canonicalized to the mailbox's
+single internal Dovecot user. Delivery-only aliases have a NULL password and
+therefore cannot authenticate. Dovecot uses only the mailbox UID/GID to access
+the files, so it never receives multiple mail users with the same home.
+
+This follows Dovecot's rule that [different mail users must not share one
+home](https://doc.dovecot.org/main/core/config/auth/users/virtual.html). The
+documented [userdb `user`
+result](https://doc.dovecot.org/2.4.0/core/config/auth/userdb.html) changes every
+public login/delivery address to one canonical storage user only when mailbox
+storage is opened. SMTP authentication retains the registered public address
+so Postfix can enforce sender ownership. The behavior is integration-tested
+against the official Dovecot 2.3 and 2.4 Docker images.
 
 When a mailbox is created:
 
@@ -78,13 +94,28 @@ When a mailbox is created:
   provide a filesystem path.
 - A missing `Mail` directory is created and assigned to that Unix UID/GID.
 - An existing empty `Mail` directory is reused with a warning.
-- An existing non-empty `Mail` directory causes an error and is never changed.
+- An existing non-empty, unmanaged `Mail` directory causes an error and is
+  never changed.
 - Existing mail is not migrated automatically.
 
-More than one virtual identity may point at the same home while its `Mail`
-directory is empty. Those identities share the same physical mailbox. Purging
-one shared identity removes only its database row; physical mail is retained
-until the final identity using that home is purged.
+`user add` creates a new physical mailbox and refuses to reuse an already
+managed Unix home. Additional addresses must explicitly select an existing
+target with `alias add --to`. A login alias has its own password but resolves to
+the target's internal storage user. A delivery-only alias has no password.
+Purging an alias removes only its address row; physical mail is retained until
+the final address using that mailbox is purged.
+
+Email local parts follow consumer-Gmail-style dot canonicalization:
+
+- New addresses accept only letters, digits and dots before `@`.
+- Dots are ignored for uniqueness, login and inbound recipient lookup. If
+  `ahmet.mehmet@example.com` is registered, `ah.metmehmet@example.com` resolves
+  to it and cannot be registered separately.
+- The originally registered spelling remains the managed public address;
+  Dovecot uses a separate opaque internal storage identity.
+- `+tag` is accepted only for inbound delivery. It is not accepted when
+  registering or logging in.
+- Canonicalization never removes dots from the domain name.
 
 ## Application architecture
 
@@ -101,7 +132,8 @@ app/
 ├── installer/                 package and service installation features
 ├── management/
 │   ├── domain/                one module per domain lifecycle command
-│   ├── user/                  one module per mailbox lifecycle command
+│   ├── user/                  one module per mail-user lifecycle command
+│   ├── alias/                 delivery-only and independently authenticated aliases
 │   └── system/                initialization, TLS, rendering and versioning
 └── helpers/
     ├── common.sh              shared process helpers
@@ -259,7 +291,7 @@ sudo emailwizctl domain delete example.net --purge
 system certificate is never owned by an individual domain and is therefore
 never removed by domain deletion.
 
-## Mailbox management
+## Mail-user management
 
 Create the Unix account yourself, then map the virtual mailbox to its home:
 
@@ -267,6 +299,37 @@ Create the Unix account yourself, then map the virtual mailbox to its home:
 sudo useradd -m mehmet
 sudo emailwizctl user add alice@example.com --unix-user mehmet
 ```
+
+Add a delivery-only alias to the same mailbox:
+
+```sh
+sudo emailwizctl alias add info@example.net --to alice@example.com
+```
+
+It receives mail in `/home/mehmet/Mail` but cannot log in or send as
+`info@example.net`.
+
+Add an independently authenticated alias by passing the boolean `--passwd`
+option:
+
+```sh
+sudo emailwizctl alias add support@example.net --to alice@example.com --passwd
+```
+
+`--passwd` never takes the password as an argument. It opens the same hidden,
+confirmed terminal prompt used by `user add`, so the password is not written to
+shell history. For automation, provide exactly one line on standard input:
+
+```sh
+printf '%s\n' "$ALIAS_PASSWORD" |
+  sudo emailwizctl alias add support@example.net --to alice@example.com \
+    --password-stdin
+```
+
+The login alias has its own password and sending identity, but resolves to the
+same internal Dovecot user and reads/writes the same physical Maildir.
+Running `emailwizctl user passwd ADDRESS` on a delivery-only alias assigns a
+password and promotes it to a login alias.
 
 The password is prompted for without echoing. Automation can supply exactly
 one line on standard input:
@@ -291,6 +354,46 @@ Soft deletion only disables authentication and delivery. User purge deletes
 the database identity and, for the final identity mapped to that home, exactly
 `<home_path>/Mail`; it retains the Unix account and every other file in the
 home directory. Symlinked or unexpected paths are rejected.
+
+## Address behavior cases
+
+### Registration
+
+| Case | Result |
+| --- | --- |
+| `user add mehmet@example.com --unix-user mehmet` | Creates one mailbox and prompts for its first login password |
+| A second `user add` with `--unix-user mehmet` | Rejected; additional addresses must use `alias add --to` |
+| `alias add info@example.com --to mehmet@example.com` | Creates a delivery-only alias with no password |
+| `alias add ahmet@example.com --to mehmet@example.com --passwd` | Prompts for an independent password and creates a login alias |
+| `ahmet.mehmet@example.com` exists, then `ah.metmehmet@example.com` is added | Rejected as a canonical dotted-address collision |
+| `ahmet@example.com` and `ahmet@example.net` | Allowed because domains are independent |
+| A new local part containing `_`, `-`, `%` or `+` | Rejected |
+
+### Login
+
+| Login attempt | Result |
+| --- | --- |
+| Registered address plus its own password | Accepted and mapped to the mailbox's internal Dovecot user |
+| A dotted spelling such as `ah.metmehmet@example.com` plus the registered identity's password | Accepted after dot canonicalization |
+| Login alias plus the target user's password | Rejected; every login address has an independent password |
+| Delivery-only alias such as `info@example.com` | Rejected because its password hash is NULL |
+| `ahmet.mehmet+shop@example.com` | Rejected because `+tag` is delivery-only |
+| Wrong password, disabled address or disabled domain | Rejected |
+
+### Inbound delivery
+
+| Recipient | Result |
+| --- | --- |
+| Exact registered address | Delivered to the mapped mailbox |
+| Dotted variant such as `ah.metmehmet@example.com` | Delivered to the same mailbox after dot canonicalization |
+| `ahmet.mehmet+shop@example.com` | Delivered to the same mailbox after removing `+shop` |
+| Dotted plus tagged address | Tag removal and dot canonicalization resolve the same mailbox |
+| Delivery-only or login alias | Delivered to the target mailbox |
+| Unknown canonical address, disabled address or disabled domain | Rejected during SMTP recipient validation |
+
+All login addresses mapped to one mailbox intentionally share its messages,
+folders, read/deleted state, Sieve rules and quota. They differ only in public
+address, authentication password and permitted SMTP sender identity.
 
 ## Client settings
 
