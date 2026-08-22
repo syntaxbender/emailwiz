@@ -83,6 +83,6 @@ smtps     inet  n       -       y       -       -       smtpd
 
 	if [ "$use_spamassassin" = yes ]; then
 		echo "spamassassin unix -     n       n       -       -       pipe
-  user=debian-spamd argv=/usr/bin/spamc -f -e /usr/sbin/sendmail -oi -f \${sender} \${recipient}" >> /etc/postfix/master.cf
+	  user=debian-spamd argv=/usr/bin/spamc -f -e /usr/sbin/sendmail -oi -f \${sender} -- \${recipient}" >> /etc/postfix/master.cf
 	fi
 }
