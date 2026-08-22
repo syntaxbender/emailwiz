@@ -182,6 +182,23 @@ if sh "$repo_dir/emailwiz.sh" --help | grep -Fi 'self-signed' >/dev/null; then
 	printf 'Installer help still documents self-signed certificate generation.\n' >&2
 	exit 1
 fi
+
+# The installer deploys the same modular application tree used from a checkout.
+EMAILWIZ_APP_DIR="$repo_dir/app"
+EMAILWIZ_REPO_DIR=$repo_dir
+export EMAILWIZ_APP_DIR EMAILWIZ_REPO_DIR
+# shellcheck source=../app/installer/packages.sh
+. "$repo_dir/app/installer/packages.sh"
+install_prefix="$test_root/installed/usr/local"
+EMAILWIZ_INSTALL_PREFIX="$install_prefix" emailwiz_installer_install_application
+unset EMAILWIZ_APP_DIR
+"$install_prefix/sbin/emailwizctl" --help | grep -F 'emailwizctl domain add' >/dev/null || {
+	printf 'The installed modular management application could not be loaded.\n' >&2
+	exit 1
+}
+# Continue exercising the checkout entrypoint rather than the installed copy.
+export EMAILWIZ_APP_DIR="$repo_dir/app"
+
 MOCK_DOVECOT_VERSION=2.3.16 "$ctl" domain add example.com --no-reload
 MOCK_DOVECOT_VERSION=2.3.16 "$ctl" domain add example.net --no-reload
 

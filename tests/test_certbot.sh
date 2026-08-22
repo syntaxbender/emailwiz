@@ -68,9 +68,10 @@ export PATH="$bin_dir:$PATH"
 export EMAILWIZ_TEST_MODE=1
 export EMAILWIZ_LETSENCRYPT_LIVE_ROOT="$live_root"
 export MOCK_COMMAND_LOG="$command_log"
+export EMAILWIZ_APP_DIR="$repo_dir/app"
 
-# shellcheck source=../lib/certbot.sh
-. "$repo_dir/lib/certbot.sh"
+# shellcheck source=../app/helpers/installer/certbot.sh
+. "$EMAILWIZ_APP_DIR/helpers/installer/certbot.sh"
 
 assert_contains() {
 	needle=$1
@@ -156,7 +157,7 @@ if emailwiz_certbot_run mail.insecure.example dns-cloudflare "$bin_dir/acme-dns-
 fi
 
 if grep -Eq '^[[:space:]]*ufw[[:space:]]+allow[[:space:]]+(80|80/tcp)' \
-	"$repo_dir/emailwiz.sh" "$repo_dir/lib/certbot.sh"; then
+	"$repo_dir/emailwiz.sh" "$repo_dir/app/helpers/installer/certbot/http.sh"; then
 	printf 'The installer still modifies the TCP/80 UFW rule.\n' >&2
 	exit 1
 fi

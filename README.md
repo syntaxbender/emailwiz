@@ -83,6 +83,34 @@ directory is empty. Those identities share the same physical mailbox. Purging
 one shared identity removes only its database row; physical mail is retained
 until the final identity using that home is purged.
 
+## Application architecture
+
+The public entrypoints are intentionally small and stable:
+
+- `emailwiz.sh` starts the one-time installer application.
+- `emailwizctl` starts the ongoing management application.
+
+Implementation is grouped by responsibility rather than kept in either
+entrypoint:
+
+```text
+app/
+├── installer/                 package and service installation features
+├── management/
+│   ├── domain/                one module per domain lifecycle command
+│   ├── user/                  one module per mailbox lifecycle command
+│   └── system/                initialization, TLS, rendering and versioning
+└── helpers/
+    ├── common.sh              shared process helpers
+    ├── database.sh            shared SQLite access
+    ├── validation.sh          shared input/platform validation
+    └── installer/certbot/     HTTP-01, acme-dns and Cloudflare adapters
+```
+
+The installer copies this tree to `/usr/local/lib/emailwiz` and installs only
+the `emailwizctl` launcher in `/usr/local/sbin`. Commands run from a repository
+checkout and commands run after installation therefore use the same modules.
+
 ## Installation
 
 The installer now needs `emailwizctl`, so clone the repository instead of
