@@ -6,26 +6,26 @@ user_add() {
 	[ "$#" -ge 1 ] || die "user add requires ADDRESS."
 	address=$(normalize_address "$1")
 	shift
-	home=''
+	unix_user=''
 	password_stdin=0
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
-			--home)
-				[ "$#" -ge 2 ] || die "--home requires a value."
-				home=$2
+			--unix-user)
+				[ "$#" -ge 2 ] || die "--unix-user requires a value."
+				unix_user=$2
 				shift 2
 				;;
 			--password-stdin) password_stdin=1; shift ;;
 			*) die "Unknown user add option: $1" ;;
 		esac
 	done
-	[ -n "$home" ] || die "user add requires --home /home/USER."
+	[ -n "$unix_user" ] || die "user add requires --unix-user USER."
 	domain=${address#*@}
 	localpart=${address%@*}
 	domain_is_active "$domain" || die "Domain is not active: $domain"
 	q_address=$(sql_escape "$address")
 	[ "$(sql "SELECT COUNT(*) FROM mail_users WHERE email = '$q_address';")" -eq 0 ] || die "User already exists: $address"
-	validate_home_path "$home"
+	resolve_unix_user "$unix_user"
 	read_password "$password_stdin"
 	prepare_mail_home "$home" "$uid" "$gid"
 	q_domain=$(sql_escape "$domain")

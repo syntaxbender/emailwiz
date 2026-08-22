@@ -8,21 +8,58 @@ lookup_home_identity() {
 	printf '%s\n' "$entries"
 }
 
-validate_home_path() {
+validate_home_directory() {
 	home=$1
+	expected_uid=$2
+	[ -n "$home" ] || die "Unix user '$unix_user' has no home directory configured."
 	case "$home" in "$HOME_ROOT"/*) ;; *) die "home_path must be an existing path below $HOME_ROOT: $home" ;; esac
 	case "$home" in *[!a-zA-Z0-9_./-]*) die "home_path contains unsupported characters: $home" ;; esac
 	[ -d "$home" ] || die "Unix home directory does not exist: $home"
 	[ ! -L "$home" ] || die "Symlinked Unix home directories are not supported: $home"
 	resolved_home=$(readlink -f "$home")
 	[ "$resolved_home" = "$home" ] || die "home_path must be canonical and cannot contain symlink or '..' components: $home"
+	owner_uid=$(stat -c %u "$home")
+	[ "$owner_uid" = "$expected_uid" ] || die "Unix home $home is owned by UID $owner_uid, but /etc/passwd maps it to UID $expected_uid."
+}
+
+resolve_unix_user() {
+	requested_unix_user=$1
+	case "$requested_unix_user" in
+		''|-*|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-]*)
+			die "Invalid Unix user name: $requested_unix_user"
+			;;
+	esac
+	passwd_entry=$(getent passwd "$requested_unix_user" 2>/dev/null) ||
+		die "Unix user does not exist: $requested_unix_user"
+	[ -n "$passwd_entry" ] || die "Unix user does not exist: $requested_unix_user"
+	entry_count=$(printf '%s\n' "$passwd_entry" | awk 'END { print NR }')
+	[ "$entry_count" -eq 1 ] || die "Unix user lookup returned more than one entry: $requested_unix_user"
+
+	unix_user=${passwd_entry%%:*}
+	passwd_rest=${passwd_entry#*:}
+	passwd_rest=${passwd_rest#*:}
+	uid=${passwd_rest%%:*}
+	passwd_rest=${passwd_rest#*:}
+	gid=${passwd_rest%%:*}
+	passwd_rest=${passwd_rest#*:}
+	passwd_rest=${passwd_rest#*:}
+	home=${passwd_rest%%:*}
+
+	[ "$unix_user" = "$requested_unix_user" ] ||
+		die "Unix user lookup returned '$unix_user' for '$requested_unix_user'."
+	case "$uid" in ''|*[!0-9]*) die "Unix user '$unix_user' has an invalid UID: $uid" ;; esac
+	case "$gid" in ''|*[!0-9]*) die "Unix user '$unix_user' has an invalid GID: $gid" ;; esac
+	validate_home_directory "$home" "$uid"
+}
+
+validate_home_path() {
+	home=$1
 	identity=$(lookup_home_identity "$home")
 	unix_user=${identity%%:*}
 	rest=${identity#*:}
 	uid=${rest%%:*}
 	gid=${rest#*:}
-	owner_uid=$(stat -c %u "$home")
-	[ "$owner_uid" = "$uid" ] || die "Unix home $home is owned by UID $owner_uid, but /etc/passwd maps it to UID $uid."
+	validate_home_directory "$home" "$uid"
 }
 
 prepare_mail_home() {

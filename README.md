@@ -72,7 +72,10 @@ stored UID/GID to access that user's mail files.
 
 When a mailbox is created:
 
-- `home_path` must exactly match one `/etc/passwd` home directory below `/home`.
+- `--unix-user` must name an existing Unix account whose `/etc/passwd` home is
+  below `/home`.
+- Emailwiz reads `home_path`, UID and GID from that account; the caller does not
+  provide a filesystem path.
 - A missing `Mail` directory is created and assigned to that Unix UID/GID.
 - An existing empty `Mail` directory is reused with a warning.
 - An existing non-empty `Mail` directory causes an error and is never changed.
@@ -257,7 +260,7 @@ Create the Unix account yourself, then map the virtual mailbox to its home:
 
 ```sh
 sudo useradd -m mehmet
-sudo emailwizctl user add alice@example.com --home /home/mehmet
+sudo emailwizctl user add alice@example.com --unix-user mehmet
 ```
 
 The password is prompted for without echoing. Automation can supply exactly
@@ -265,7 +268,7 @@ one line on standard input:
 
 ```sh
 printf '%s\n' "$MAIL_PASSWORD" |
-  sudo emailwizctl user add alice@example.com --home /home/mehmet --password-stdin
+  sudo emailwizctl user add alice@example.com --unix-user mehmet --password-stdin
 ```
 
 Other management commands:

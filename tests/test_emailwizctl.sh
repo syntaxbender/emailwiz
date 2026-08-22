@@ -84,10 +84,18 @@ EOF
 
 cat > "$bin_dir/getent" <<EOF
 #!/bin/sh
-if [ "\${1:-}" = passwd ] && [ "\$#" -eq 1 ]; then
-	printf 'alice:x:$uid:$gid::${test_root}/home/alice:/bin/sh\n'
-	printf 'bob:x:$uid:$gid::${test_root}/home/bob:/bin/sh\n'
-	exit 0
+if [ "\${1:-}" = passwd ]; then
+	case "\$#:\${2:-}" in
+		1:)
+			printf 'alice:x:$uid:$gid::${test_root}/home/alice:/bin/sh\n'
+			printf 'bob:x:$uid:$gid::${test_root}/home/bob:/bin/sh\n'
+			printf 'nohome:x:$uid:$gid:::/bin/sh\n'
+			exit 0
+			;;
+		2:alice) printf 'alice:x:$uid:$gid::${test_root}/home/alice:/bin/sh\n'; exit 0 ;;
+		2:bob) printf 'bob:x:$uid:$gid::${test_root}/home/bob:/bin/sh\n'; exit 0 ;;
+		2:nohome) printf 'nohome:x:$uid:$gid:::/bin/sh\n'; exit 0 ;;
+	esac
 fi
 exit 1
 EOF
@@ -218,24 +226,38 @@ cp "$EMAILWIZ_DOVECOT_CONF" "$test_root/dovecot-2.3.conf"
 cp "$EMAILWIZ_DOVECOT_SQL_CONF" "$test_root/emailwiz-sql-2.3.conf.ext"
 
 printf 'correct horse battery staple\n' | MOCK_DOVECOT_VERSION=2.3.16 "$ctl" user add \
-	alice@example.com --home "$test_root/home/alice" --password-stdin
+	alice@example.com --unix-user alice --password-stdin
 assert_sql "$test_root/home/alice" "SELECT home_path FROM mail_users WHERE email = 'alice@example.com';"
 assert_sql "$uid|$gid" "SELECT uid || '|' || gid FROM mail_users WHERE email = 'alice@example.com';"
 
 # A second virtual identity may intentionally share the still-empty Mail path.
 printf 'another password\n' | MOCK_DOVECOT_VERSION=2.3.16 "$ctl" user add \
-	alias@example.net --home "$test_root/home/alice" --password-stdin
+	alias@example.net --unix-user alice --password-stdin
 assert_sql 2 "SELECT COUNT(*) FROM mail_users WHERE home_path = '$test_root/home/alice';"
 
 # Non-empty pre-existing mail is never adopted or modified.
 mkdir "$test_root/home/bob/Mail"
 printf 'existing mail\n' > "$test_root/home/bob/Mail/existing"
 if printf 'password\n' | MOCK_DOVECOT_VERSION=2.3.16 "$ctl" user add \
-	bob@example.com --home "$test_root/home/bob" --password-stdin >/dev/null 2>&1; then
+	bob@example.com --unix-user bob --password-stdin >/dev/null 2>&1; then
 	printf 'A non-empty existing Mail directory was unexpectedly accepted.\n' >&2
 	exit 1
 fi
 assert_sql 0 "SELECT COUNT(*) FROM mail_users WHERE email = 'bob@example.com';"
+
+# User creation resolves home/UID/GID from an existing Unix account.
+if "$ctl" user add missing@example.com --unix-user missing >/dev/null 2>&1; then
+	printf 'A missing Unix user was unexpectedly accepted.\n' >&2
+	exit 1
+fi
+if "$ctl" user add nohome@example.com --unix-user nohome >/dev/null 2>&1; then
+	printf 'A Unix user without a configured home was unexpectedly accepted.\n' >&2
+	exit 1
+fi
+if "$ctl" user add legacy@example.com --home "$test_root/home/alice" >/dev/null 2>&1; then
+	printf 'The removed --home option was unexpectedly accepted.\n' >&2
+	exit 1
+fi
 
 "$ctl" user delete alice@example.com
 assert_sql 0 "SELECT enabled FROM mail_users WHERE email = 'alice@example.com';"

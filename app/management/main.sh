@@ -48,7 +48,7 @@ Usage:
   emailwizctl domain delete DOMAIN [--purge] [--no-reload]
   emailwizctl domain enable DOMAIN [--no-reload]
 
-  emailwizctl user add ADDRESS --home /home/USER [--password-stdin]
+  emailwizctl user add ADDRESS --unix-user USER [--password-stdin]
   emailwizctl user list [--domain DOMAIN] [--all]
   emailwizctl user passwd ADDRESS [--password-stdin]
   emailwizctl user delete ADDRESS [--purge]
