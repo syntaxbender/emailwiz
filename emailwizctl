@@ -36,8 +36,8 @@ die() {
 usage() {
 	cat <<'EOF'
 Usage:
-  emailwizctl system init [--certificate-mode letsencrypt|selfsigned] [--spamassassin yes|no]
-  emailwizctl system tls HOSTNAME --cert-dir DIR [--no-reload]
+  emailwizctl system init [--spamassassin yes|no]
+  emailwizctl system tls HOSTNAME --cert-dir DIR [--authenticator METHOD] [--no-reload]
   emailwizctl system render [--no-reload]
   emailwizctl system version
 
@@ -102,6 +102,13 @@ metadata_delete() {
 
 normalize_domain() {
 	printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+validate_certificate_authenticator() {
+	case "$1" in
+		http-01|dns-acme|dns-cloudflare|external) ;;
+		*) die "Certificate authenticator must be http-01, dns-acme, dns-cloudflare or external." ;;
+	esac
 }
 
 validate_domain() {
@@ -333,15 +340,9 @@ EOF
 
 system_init() {
 	require_root
-	mode=''
 	spamassassin=''
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
-			--certificate-mode)
-				[ "$#" -ge 2 ] || die "--certificate-mode requires a value."
-				mode=$2
-				shift 2
-				;;
 			--spamassassin)
 				[ "$#" -ge 2 ] || die "--spamassassin requires a value."
 				spamassassin=$2
@@ -353,18 +354,13 @@ system_init() {
 	validate_ubuntu_release
 	detect_dovecot
 	init_database
-	if [ -z "$mode" ]; then
-		mode=$(metadata_get certificate_mode || true)
-		mode=${mode:-letsencrypt}
-	fi
-	case "$mode" in letsencrypt|selfsigned) ;; *) die "Certificate mode must be letsencrypt or selfsigned." ;; esac
 	if [ -z "$spamassassin" ]; then
 		spamassassin=$(metadata_get spamassassin_enabled || true)
 		spamassassin=${spamassassin:-no}
 	fi
 	case "$spamassassin" in yes|no) ;; *) die "SpamAssassin mode must be yes or no." ;; esac
-	metadata_set schema_version 2
-	metadata_set certificate_mode "$mode"
+	metadata_set schema_version 3
+	metadata_delete certificate_mode
 	metadata_set spamassassin_enabled "$spamassassin"
 	metadata_set dovecot_version "$DOVECOT_VERSION"
 	metadata_set dovecot_family "$DOVECOT_FAMILY"
@@ -386,6 +382,7 @@ system_tls() {
 	shift
 	validate_domain "$hostname"
 	cert_dir=''
+	authenticator=''
 	no_reload=0
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
@@ -394,33 +391,51 @@ system_tls() {
 				cert_dir=$2
 				shift 2
 				;;
+			--authenticator)
+				[ "$#" -ge 2 ] || die "--authenticator requires a value."
+				authenticator=$2
+				shift 2
+				;;
 			--no-reload) no_reload=1; shift ;;
 			*) die "Unknown system tls option: $1" ;;
 		esac
 	done
 	[ -n "$cert_dir" ] || die "system tls requires --cert-dir DIR."
 	validate_certificate_hostname "$cert_dir" "$hostname"
+	if [ -z "$authenticator" ]; then
+		authenticator=$(metadata_get certificate_authenticator || true)
+		authenticator=${authenticator:-external}
+	fi
+	validate_certificate_authenticator "$authenticator"
 
 	old_hostname=$(metadata_get canonical_mail_hostname || true)
 	old_cert_dir=$(metadata_get canonical_cert_dir || true)
+	old_authenticator=$(metadata_get certificate_authenticator || true)
 	metadata_set canonical_mail_hostname "$hostname"
 	metadata_set canonical_cert_dir "$cert_dir"
+	metadata_set certificate_authenticator "$authenticator"
 
 	if [ "$(active_domain_count)" -gt 0 ]; then
 		if ! render_all; then
 			if [ -n "$old_hostname" ] && [ -n "$old_cert_dir" ]; then
 				metadata_set canonical_mail_hostname "$old_hostname"
 				metadata_set canonical_cert_dir "$old_cert_dir"
+				if [ -n "$old_authenticator" ]; then
+					metadata_set certificate_authenticator "$old_authenticator"
+				else
+					metadata_delete certificate_authenticator
+				fi
 				render_all || warn "Could not restore the previous generated configuration automatically."
 			else
 				metadata_delete canonical_mail_hostname
 				metadata_delete canonical_cert_dir
+				metadata_delete certificate_authenticator
 			fi
 			die "Configuration rendering failed; canonical TLS metadata was rolled back."
 		fi
 		[ "$no_reload" -eq 1 ] || reload_services
 	fi
-	say "Canonical mail TLS identity set to $hostname using $cert_dir."
+	say "Canonical mail TLS identity set to $hostname using $cert_dir ($authenticator)."
 }
 
 require_active_domains() {
@@ -745,9 +760,10 @@ system_version() {
 	configured=$(metadata_get dovecot_family || true)
 	spamassassin=$(metadata_get spamassassin_enabled || true)
 	canonical_hostname=$(metadata_get canonical_mail_hostname || true)
-	printf 'installed=%s\ndetected_family=%s\nconfigured_family=%s\nspamassassin=%s\ncanonical_mail_hostname=%s\n' \
+	certificate_authenticator=$(metadata_get certificate_authenticator || true)
+	printf 'installed=%s\ndetected_family=%s\nconfigured_family=%s\nspamassassin=%s\ncanonical_mail_hostname=%s\ncertificate_authenticator=%s\n' \
 		"$DOVECOT_VERSION" "$DOVECOT_FAMILY" "${configured:-not-rendered}" "${spamassassin:-no}" \
-		"${canonical_hostname:-not-configured}"
+		"${canonical_hostname:-not-configured}" "${certificate_authenticator:-not-configured}"
 }
 
 ensure_dkim_key() {

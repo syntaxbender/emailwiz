@@ -138,6 +138,8 @@ assert_sql() {
 
 MOCK_DOVECOT_VERSION=2.3.16 "$ctl" system init
 assert_sql no "SELECT value FROM metadata WHERE key = 'spamassassin_enabled';"
+assert_sql 3 "SELECT value FROM metadata WHERE key = 'schema_version';"
+assert_sql 0 "SELECT COUNT(*) FROM metadata WHERE key = 'certificate_mode';"
 assert_contains 'keep;' "$EMAILWIZ_SIEVE_DIR/default.sieve"
 if MOCK_DOVECOT_VERSION=2.3.16 "$ctl" domain add example.com --no-reload >/dev/null 2>&1; then
 	printf 'A domain was unexpectedly added before canonical TLS was configured.\n' >&2
@@ -145,9 +147,15 @@ if MOCK_DOVECOT_VERSION=2.3.16 "$ctl" domain add example.com --no-reload >/dev/n
 fi
 assert_sql 0 'SELECT COUNT(*) FROM domains;'
 MOCK_DOVECOT_VERSION=2.3.16 "$ctl" system tls mail.example.com \
-	--cert-dir "$test_root/certs/mail.example.com" --no-reload
+	--cert-dir "$test_root/certs/mail.example.com" --authenticator http-01 --no-reload
 assert_sql mail.example.com "SELECT value FROM metadata WHERE key = 'canonical_mail_hostname';"
 assert_sql "$test_root/certs/mail.example.com" "SELECT value FROM metadata WHERE key = 'canonical_cert_dir';"
+assert_sql http-01 "SELECT value FROM metadata WHERE key = 'certificate_authenticator';"
+if MOCK_DOVECOT_VERSION=2.3.16 "$ctl" system tls mail.example.com \
+	--cert-dir "$test_root/certs/mail.example.com" --authenticator invalid --no-reload >/dev/null 2>&1; then
+	printf 'An invalid certificate authenticator was unexpectedly accepted.\n' >&2
+	exit 1
+fi
 if grep -F 'X-Spam-Flag' "$EMAILWIZ_SIEVE_DIR/default.sieve" >/dev/null; then
 	printf 'Disabled SpamAssassin unexpectedly installed the global spam Sieve rule.\n' >&2
 	exit 1
@@ -166,6 +174,14 @@ sh "$repo_dir/emailwiz.sh" --help | grep -F -- '--with-spamassassin' >/dev/null 
 	printf 'Installer help does not document the SpamAssassin option.\n' >&2
 	exit 1
 }
+sh "$repo_dir/emailwiz.sh" --help | grep -F -- '--certbot-authenticator' >/dev/null || {
+	printf 'Installer help does not document Certbot authenticator selection.\n' >&2
+	exit 1
+}
+if sh "$repo_dir/emailwiz.sh" --help | grep -Fi 'self-signed' >/dev/null; then
+	printf 'Installer help still documents self-signed certificate generation.\n' >&2
+	exit 1
+fi
 MOCK_DOVECOT_VERSION=2.3.16 "$ctl" domain add example.com --no-reload
 MOCK_DOVECOT_VERSION=2.3.16 "$ctl" domain add example.net --no-reload
 
@@ -318,6 +334,14 @@ EMAILWIZ_DKIM_ROOT="$migration_root/etc/postfix/dkim" \
 EMAILWIZ_SIEVE_DIR="$migration_root/sieve" \
 EMAILWIZ_RENEW_HOOK="$migration_root/renewal-hooks/deploy/emailwiz" \
 MOCK_DOVECOT_VERSION=2.3.16 "$ctl" system init
+[ "$("$bin_dir/sqlite3" "$migration_db" "SELECT value FROM metadata WHERE key = 'schema_version';")" = 3 ] || {
+	printf 'Migrated database does not use schema metadata version 3.\n' >&2
+	exit 1
+}
+[ "$("$bin_dir/sqlite3" "$migration_db" "SELECT COUNT(*) FROM metadata WHERE key = 'certificate_mode';")" = 0 ] || {
+	printf 'Legacy certificate_mode metadata was not removed.\n' >&2
+	exit 1
+}
 [ "$("$bin_dir/sqlite3" "$migration_db" "SELECT value FROM metadata WHERE key = 'canonical_mail_hostname';")" = mail.legacy.example ] || {
 	printf 'Legacy canonical hostname was not migrated.\n' >&2
 	exit 1

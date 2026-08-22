@@ -19,23 +19,81 @@ umask 0022
 
 usage() {
 	cat <<'EOF'
-Usage: emailwiz.sh [--with-spamassassin|--without-spamassassin]
+Usage: emailwiz.sh [OPTIONS]
 
   --with-spamassassin     Install SpamAssassin and filter inbound SMTP mail.
   --without-spamassassin  Do not install or configure SpamAssassin (default).
+  --certbot-authenticator METHOD
+                          http-01 (default), dns-acme or dns-cloudflare.
+  --acme-dns-client PATH  Absolute acme-dns-client path for dns-acme
+                          (default: /usr/local/bin/acme-dns-client).
+  --cloudflare-credentials FILE
+                          Root-only INI file containing a Cloudflare API token.
 EOF
 }
 
 use_spamassassin=no
+certbot_authenticator=http-01
+acme_dns_client=/usr/local/bin/acme-dns-client
+acme_dns_client_explicit=0
+cloudflare_credentials=''
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--with-spamassassin) use_spamassassin=yes ;;
 		--without-spamassassin) use_spamassassin=no ;;
+		--certbot-authenticator)
+			[ "$#" -ge 2 ] || { usage >&2; printf '%s\n' 'Missing value for --certbot-authenticator.' >&2; exit 1; }
+			certbot_authenticator=$2
+			shift
+			;;
+		--acme-dns-client)
+			[ "$#" -ge 2 ] || { usage >&2; printf '%s\n' 'Missing value for --acme-dns-client.' >&2; exit 1; }
+			acme_dns_client=$2
+			acme_dns_client_explicit=1
+			shift
+			;;
+		--cloudflare-credentials)
+			[ "$#" -ge 2 ] || { usage >&2; printf '%s\n' 'Missing value for --cloudflare-credentials.' >&2; exit 1; }
+			cloudflare_credentials=$2
+			shift
+			;;
 		-h|--help) usage; exit 0 ;;
 		*) usage >&2; printf 'Unknown option: %s\n' "$1" >&2; exit 1 ;;
 	esac
 	shift
 done
+
+case "$certbot_authenticator" in
+	http-01)
+		[ "$acme_dns_client_explicit" -eq 0 ] || { printf '%s\n' '--acme-dns-client requires dns-acme.' >&2; exit 1; }
+		[ -z "$cloudflare_credentials" ] || { printf '%s\n' '--cloudflare-credentials requires dns-cloudflare.' >&2; exit 1; }
+		;;
+	dns-acme)
+		[ -z "$cloudflare_credentials" ] || { printf '%s\n' '--cloudflare-credentials cannot be combined with dns-acme.' >&2; exit 1; }
+		;;
+	dns-cloudflare)
+		[ "$acme_dns_client_explicit" -eq 0 ] || { printf '%s\n' '--acme-dns-client cannot be combined with dns-cloudflare.' >&2; exit 1; }
+		[ -n "$cloudflare_credentials" ] || { printf '%s\n' 'dns-cloudflare requires --cloudflare-credentials FILE.' >&2; exit 1; }
+		;;
+	*) printf 'Unknown Certbot authenticator: %s\n' "$certbot_authenticator" >&2; exit 1 ;;
+esac
+
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+[ -f "$script_dir/emailwizctl" ] || {
+	echo "emailwizctl was not found next to emailwiz.sh. Clone the repository and run emailwiz.sh from that checkout."
+	exit 1
+}
+[ -f "$script_dir/lib/certbot.sh" ] || {
+	echo "lib/certbot.sh was not found next to emailwiz.sh. Clone the complete repository before installing."
+	exit 1
+}
+# shellcheck source=lib/certbot.sh
+. "$script_dir/lib/certbot.sh"
+
+case "$certbot_authenticator" in
+	dns-acme) emailwiz_certbot_validate_acme_dns_client "$acme_dns_client" ;;
+	dns-cloudflare) emailwiz_certbot_validate_cloudflare_credentials "$cloudflare_credentials" ;;
+esac
 
 install_packages="postfix postfix-sqlite dovecot-imapd dovecot-pop3d dovecot-lmtpd dovecot-sieve dovecot-sqlite sqlite3 opendkim opendkim-tools net-tools fail2ban bind9-host"
 if [ "$use_spamassassin" = yes ]; then
@@ -51,53 +109,20 @@ apt-get purge '?config-files' -y $install_packages
 # shellcheck disable=SC2086
 apt-get install -y $install_packages
 
-script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-[ -f "$script_dir/emailwizctl" ] || {
-	echo "emailwizctl was not found next to emailwiz.sh. Clone the repository and run emailwiz.sh from that checkout."
-	exit 1
-}
 install -m 0755 "$script_dir/emailwizctl" /usr/local/sbin/emailwizctl
 
 domain="$(cat /etc/mailname)"
 subdom=mail
 maildomain="$subdom.$domain"
 
-selfsigned="no" # yes no
 allow_suboptimal_ciphers="yes" #yes no
-if [ "$selfsigned" = "yes" ]; then
-	certdir="/etc/emailwiz/certs/$maildomain"
-	certificate_mode=selfsigned
-else
-	certdir="/etc/letsencrypt/live/$maildomain"
-	certificate_mode=letsencrypt
-fi
-
-use_cert_config="no"
-country_name="" # IT US UK IN etc etc
-state_or_province_name=""
-organization_name=""
-common_name="$maildomain"
 
 # Fail early on unsupported Ubuntu/Dovecot versions and initialize the virtual
 # domain database before changing service configuration.
-emailwizctl system init --certificate-mode "$certificate_mode" --spamassassin "$use_spamassassin"
+emailwizctl system init --spamassassin "$use_spamassassin"
 
-if [ "$use_cert_config" = "yes" ]; then
-	mkdir -p "$certdir"
-	echo "[req]
-	default_bit = 4096
-	distinguished_name = req_distinguished_name
-	prompt = no
-
-	[req_distinguished_name]
-	countryName             = $country_name
-	stateOrProvinceName     = $state_or_province_name
-	organizationName        = $organization_name
-	commonName              = $common_name " > "$certdir/certconfig.conf"
-
-fi
-
-# The mail hostname needs at least one public address before Certbot can use it.
+# The canonical hostname needs a public address for mail clients, MX delivery,
+# SMTP identity and PTR/rDNS consistency, independently of ACME challenge type.
 ipv4=$(host "$maildomain" 2>/dev/null | awk '/ has address / { print $NF; exit }')
 ipv6=$(host "$maildomain" 2>/dev/null | awk '/ has IPv6 address / { print $NF; exit }')
 [ -n "$ipv4$ipv6" ] || {
@@ -105,66 +130,24 @@ ipv6=$(host "$maildomain" 2>/dev/null | awk '/ has IPv6 address / { print $NF; e
 	exit 1
 }
 
-# Open required mail ports
-for port in 80 993 465 25 587 110 995; do
+# Open required mail ports. TCP/80 is deliberately left to the administrator;
+# the HTTP-01 flow prints the firewall prerequisite without changing it.
+for port in 993 465 25 587 110 995; do
 	ufw allow "$port" 2>/dev/null
 done
 
-if [ "$selfsigned" = "yes" ]; then
-	rm -f "$certdir/privkey.pem"
-	rm -f "$certdir/csr.pem"
-	rm -f "$certdir/fullchain.pem"
-
-	echo "Generating a 4096 rsa key and a self-signed certificate that lasts 100 years"
-	mkdir -p "$certdir"
-	openssl genrsa -out "$certdir/privkey.pem" 4096
-
-	if [ "$use_cert_config" = "yes" ]; then
-		openssl req -new -key "$certdir/privkey.pem" -out "$certdir/csr.pem" -config "$certdir/certconfig.conf"
-	else
-		openssl req -new -key "$certdir/privkey.pem" -out "$certdir/csr.pem" \
-			-subj "/CN=$maildomain" -addext "subjectAltName=DNS:$maildomain"
-	fi
-	openssl req -x509 -days 36500 -copy_extensions copy -key "$certdir/privkey.pem" \
-		-in "$certdir/csr.pem" -out "$certdir/fullchain.pem"
-else
-
-	# Open port 80 for Certbot.
-	ufw allow 80 2>/dev/null
-
-	[ ! -d "$certdir" ] &&
-		possiblecert="$(certbot certificates 2>/dev/null | grep "Domains:\.* \(\*\.$domain\|$maildomain\)\(\s\|$\)" -A 2 | awk '/Certificate Path/ {print $3}' | head -n1)" &&
-		certdir="${possiblecert%/*}"
-
-	[ ! -d "$certdir" ] &&
-		certdir="/etc/letsencrypt/live/$maildomain" &&
-		case "$(netstat -tulpn | grep ":80\s")" in
-		*nginx*)
-			apt-get install -y python3-certbot-nginx
-			certbot -d "$maildomain" certonly --nginx --register-unsafely-without-email --agree-tos
-			;;
-		*apache*)
-			apt-get install -y python3-certbot-apache
-			certbot -d "$maildomain" certonly --apache --register-unsafely-without-email --agree-tos
-			;;
-		*)
-			apt-get install -y python3-certbot
-			certbot -d "$maildomain" certonly --standalone --register-unsafely-without-email --agree-tos
-			;;
-	esac
-
-fi
+certdir=$(emailwiz_certbot_run "$maildomain" "$certbot_authenticator" \
+	"$acme_dns_client" "$cloudflare_credentials")
 
 [ ! -f "$certdir/fullchain.pem" ] && echo "Error locating or installing SSL certificate." && exit 1
 [ ! -f "$certdir/privkey.pem" ] && echo "Error locating or installing SSL certificate." && exit 1
-if [ "$selfsigned" != "yes" ]; then
-	[ ! -f "$certdir/cert.pem" ] && echo "Error locating or installing SSL certificate." && exit 1
-fi
+[ ! -f "$certdir/cert.pem" ] && echo "Error locating or installing SSL certificate." && exit 1
 
 [ ! -d "$certdir" ] && echo "Error locating or installing SSL certificate." && exit 1
 
 # TLS identity belongs to the mail system, not to an individual hosted domain.
-emailwizctl system tls "$maildomain" --cert-dir "$certdir" --no-reload
+emailwizctl system tls "$maildomain" --cert-dir "$certdir" \
+	--authenticator "$certbot_authenticator" --no-reload
 emailwizctl domain add "$domain" --no-reload
 
 echo "Configuring Postfix's main.cf..."
@@ -180,9 +163,7 @@ postconf -e 'mydestination = $myhostname, mail, localhost.localdomain, localhost
 # Change the cert/key files to the default locations of the Let's Encrypt cert/key
 postconf -e "smtpd_tls_key_file=$certdir/privkey.pem"
 postconf -e "smtpd_tls_cert_file=$certdir/fullchain.pem"
-if [ "$selfsigned" != "yes" ]; then
-	postconf -e "smtp_tls_CAfile=$certdir/cert.pem"
-fi
+postconf -e "smtp_tls_CAfile=$certdir/cert.pem"
 
 # Enable, but do not require TLS. Requiring it with other servers would cause
 # mail delivery problems and requiring it locally would cause many other

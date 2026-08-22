@@ -12,7 +12,7 @@ and SQLite stores virtual domains and mailbox identities.
 | Dovecot IMAP/POP3/LMTP + `dovecot-sqlite` | Client access, SQLite password authentication and delivery as the mapped Unix UID/GID |
 | SQLite | Virtual domain, mailbox, password-hash and home-path database |
 | OpenDKIM | A separate DKIM key and signing rule for every hosted domain |
-| Certbot | One certificate for the server's canonical mail hostname |
+| Certbot | One Let's Encrypt certificate for the canonical mail hostname; HTTP-01, acme-dns and Cloudflare DNS-01 are supported |
 | SpamAssassin (optional) | Inbound spam classification when explicitly enabled during installation |
 | Pigeonhole Sieve | User filtering; moves SpamAssassin-marked messages into `Junk` when that option is enabled |
 | Fail2ban | Postfix and Dovecot login protection |
@@ -94,6 +94,15 @@ cd emailwiz
 sudo sh emailwiz.sh
 ```
 
+Let's Encrypt HTTP-01 is the default authenticator. Emailwiz detects the
+process actively listening on TCP/80 and selects the Nginx or Apache Certbot
+plugin accordingly. If TCP/80 is unused, it selects Certbot standalone. An
+unknown listener causes an error instead of an unsafe standalone attempt.
+
+Emailwiz does not add or remove the TCP/80 UFW rule. In HTTP-01 mode it prints
+a reminder that TCP/80 must be reachable through UFW and any hosting-provider
+firewall. DNS-01 modes do not require TCP/80.
+
 SpamAssassin is disabled by default. Enable it explicitly if this server should
 classify inbound port 25 mail locally:
 
@@ -109,18 +118,66 @@ Before installation:
 
 1. Set `/etc/mailname` to the initial bare domain, such as `example.com`.
 2. Point `mail.example.com` to the server with an A and/or AAAA record.
-3. Ensure ports 25, 80, 110, 465, 587, 993 and 995 are allowed by the hosting provider.
-4. Configure PTR/rDNS for the server's primary mail hostname.
+3. Ensure ports 25, 110, 465, 587, 993 and 995 are allowed by the hosting provider.
+4. For HTTP-01 only, also allow inbound TCP/80 in UFW and the provider firewall.
+5. Configure PTR/rDNS for the server's primary mail hostname.
 
 The installer initializes SQLite, obtains one TLS certificate for the canonical
 mail hostname, adds the initial domain, generates its DKIM key and prints the
 required MX/SPF/DKIM/DMARC records. DNS output is retained under
 `/var/lib/emailwiz/dns/`.
 
-For an isolated installation, set `selfsigned="yes"` near the top of
-`emailwiz.sh` before running it. The canonical certificate will then be
-generated under `/etc/emailwiz/certs/`; public clients will not trust it unless
-their CA/trust configuration is managed separately.
+Self-signed certificate generation is not supported. The installer uses Let's
+Encrypt by default. An externally managed certificate can still be attached
+later with `emailwizctl system tls`.
+
+### acme-dns DNS-01
+
+Install `acme-dns-client`, register only the canonical hostname and create the
+CNAME it requests before running Emailwiz:
+
+```sh
+sudo acme-dns-client register \
+  -d mail.example.com \
+  -s https://auth.acme-dns.example
+
+sudo acme-dns-client check -d mail.example.com
+
+sudo sh emailwiz.sh \
+  --certbot-authenticator dns-acme \
+  --acme-dns-client /usr/local/bin/acme-dns-client
+```
+
+The client must be an absolute, root-owned executable that is not writable by
+group or other users. `_acme-challenge.mail.example.com` must publicly resolve
+as the CNAME created during registration. The Certbot renewal lineage retains
+the absolute authentication-hook path.
+
+### Cloudflare DNS-01
+
+Use a Cloudflare API token restricted to `Zone:DNS:Edit` for the relevant DNS
+zone. Store it outside the repository:
+
+```ini
+# /etc/letsencrypt/credentials/cloudflare.ini
+dns_cloudflare_api_token = REPLACE_WITH_TOKEN
+```
+
+Protect and pass that file to the installer:
+
+```sh
+sudo chmod 0600 /etc/letsencrypt/credentials/cloudflare.ini
+
+sudo sh emailwiz.sh \
+  --certbot-authenticator dns-cloudflare \
+  --cloudflare-credentials /etc/letsencrypt/credentials/cloudflare.ini
+```
+
+The installer adds the matching Certbot Cloudflare plugin, verifies that the
+credentials file is root-owned with mode `0600`, and never places the token in
+command arguments, logs or SQLite. Certbot stores only the credentials-file
+path in its renewal configuration. See the official
+[`certbot-dns-cloudflare` documentation](https://certbot-dns-cloudflare.readthedocs.io/en/stable/).
 
 The old standalone `adddomain.sh` command remains as a compatibility wrapper
 for `emailwizctl domain add`.
@@ -223,11 +280,13 @@ configuration:
 
 ```sh
 tests/test_emailwizctl.sh
+tests/test_certbot.sh
 
 # Optional: also parse both configs with the official Dovecot Docker images.
 EMAILWIZ_DOCKER_TEST=1 tests/test_emailwizctl.sh
 ```
 
-It covers both generated Dovecot syntax families, SQLite mappings, canonical
-TLS with multiple hosted domains, UID/GID home mapping, soft deletion and
-guarded purge behavior.
+The suites cover all three Certbot authenticators, HTTP listener selection,
+credential safeguards, both generated Dovecot syntax families, SQLite
+mappings, canonical TLS with multiple hosted domains, UID/GID home mapping,
+soft deletion and guarded purge behavior.
