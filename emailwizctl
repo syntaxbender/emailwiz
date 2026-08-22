@@ -4,21 +4,22 @@ set -eu
 umask 0027
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-if [ -n "${EMAILWIZ_APP_DIR:-}" ]; then
-	:
-elif [ -d "$script_dir/app/management" ]; then
+if [ -d "$script_dir/app/management" ]; then
 	EMAILWIZ_APP_DIR=$script_dir/app
+	EMAILWIZ_RUNTIME_MODE=development
 elif [ -d "$script_dir/../lib/emailwiz/management" ]; then
 	EMAILWIZ_APP_DIR=$(CDPATH='' cd -- "$script_dir/../lib/emailwiz" && pwd)
+	EMAILWIZ_RUNTIME_MODE=production
 else
 	EMAILWIZ_APP_DIR=/usr/local/lib/emailwiz
+	EMAILWIZ_RUNTIME_MODE=production
 fi
 
 [ -f "$EMAILWIZ_APP_DIR/management/main.sh" ] || {
 	printf 'ERROR: Emailwiz management modules were not found in %s.\n' "$EMAILWIZ_APP_DIR" >&2
 	exit 1
 }
-export EMAILWIZ_APP_DIR
+export EMAILWIZ_APP_DIR EMAILWIZ_RUNTIME_MODE
 
 # shellcheck source=app/management/main.sh
 . "$EMAILWIZ_APP_DIR/management/main.sh"

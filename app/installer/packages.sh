@@ -40,5 +40,5 @@ emailwiz_installer_install_application() {
 emailwiz_installer_run_management() {
 	# Exercise the deployed module tree during installation, not the checkout
 	# that launched the installer.
-	EMAILWIZ_APP_DIR=$install_root "$install_sbin_dir/emailwizctl" "$@"
+	"$install_sbin_dir/emailwizctl" "$@"
 }

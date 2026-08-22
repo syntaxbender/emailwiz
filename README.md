@@ -113,6 +113,11 @@ app/
 The installer copies this tree to `/usr/local/lib/emailwiz` and installs only
 the `emailwizctl` launcher in `/usr/local/sbin`. Commands run from a repository
 checkout and commands run after installation therefore use the same modules.
+The checkout launcher resolves its adjacent `app` tree, while the installed
+launcher resolves `../lib/emailwiz` from its own location. Production module,
+state, database and configuration paths cannot be overridden through process
+environment variables; those overrides are limited to the development/test
+runtime.
 
 ## Installation
 

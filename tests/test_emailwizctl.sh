@@ -125,6 +125,25 @@ export SQLITE3="$bin_dir/sqlite3"
 
 ctl="$repo_dir/emailwizctl"
 
+EMAILWIZ_APP_DIR="$test_root/missing-app" "$ctl" --help >/dev/null || {
+	printf 'The checkout launcher accepted an EMAILWIZ_APP_DIR override.\n' >&2
+	exit 1
+}
+
+production_runtime=$(
+	EMAILWIZ_RUNTIME_MODE=production \
+	EMAILWIZ_APP_DIR="$repo_dir/app" \
+	EMAILWIZ_TEST_MODE=1 \
+	EMAILWIZ_STATE_DIR="$test_root/unsafe-state" \
+	SQLITE3="$bin_dir/sqlite3" \
+	sh -c '. "$1/management/bootstrap.sh"; printf "%s|%s|%s\n" "$STATE_DIR" "$EMAILWIZ_TEST_MODE" "$SQLITE3"' \
+		sh "$repo_dir/app"
+)
+[ "$production_runtime" = '/var/lib/emailwiz|0|sqlite3' ] || {
+	printf 'Production runtime accepted test/path overrides: %s\n' "$production_runtime" >&2
+	exit 1
+}
+
 assert_contains() {
 	needle=$1
 	file=$2
@@ -186,6 +205,13 @@ sh "$repo_dir/emailwiz.sh" --help | grep -F -- '--certbot-authenticator' >/dev/n
 	printf 'Installer help does not document Certbot authenticator selection.\n' >&2
 	exit 1
 }
+EMAILWIZ_APP_DIR="$test_root/missing-installer-app" \
+	EMAILWIZ_TEST_MODE=1 \
+	EMAILWIZ_INSTALL_PREFIX="$test_root/unsafe-prefix" \
+	sh "$repo_dir/emailwiz.sh" --help >/dev/null || {
+	printf 'The installer entrypoint accepted production path/test overrides.\n' >&2
+	exit 1
+}
 if sh "$repo_dir/emailwiz.sh" --help | grep -Fi 'self-signed' >/dev/null; then
 	printf 'Installer help still documents self-signed certificate generation.\n' >&2
 	exit 1
@@ -200,7 +226,8 @@ export EMAILWIZ_APP_DIR EMAILWIZ_REPO_DIR
 install_prefix="$test_root/installed/usr/local"
 EMAILWIZ_INSTALL_PREFIX="$install_prefix" emailwiz_installer_install_application
 unset EMAILWIZ_APP_DIR
-"$install_prefix/sbin/emailwizctl" --help | grep -F 'emailwizctl domain add' >/dev/null || {
+EMAILWIZ_APP_DIR="$test_root/missing-installed-app" \
+	"$install_prefix/sbin/emailwizctl" --help | grep -F 'emailwizctl domain add' >/dev/null || {
 	printf 'The installed modular management application could not be loaded.\n' >&2
 	exit 1
 }
